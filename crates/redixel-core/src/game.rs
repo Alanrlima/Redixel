@@ -2,7 +2,7 @@ use winit::{event::MouseButton, keyboard::KeyCode};
 
 use redixel_math::{Color, Vec2};
 
-use crate::{InputAction, InputSource, RedixelError};
+use crate::{InputAction, InputSource, RedixelError, net::NetworkManager};
 
 /// The entry point for user game logic.
 ///
@@ -47,12 +47,30 @@ pub trait Game: 'static {
     type Action: InputAction;
 
     /// Called once after the GPU context is ready. Bind keys and load assets here.
+    ///
+    /// On a headless server there is no GPU context — this still runs first so
+    /// the same game code can set up its world and networking.
     fn on_start(&mut self, ctx: &mut dyn GameContext<Self::Action>);
 
-    /// Called every frame before rendering. Update game state here.
+    /// Called on a fixed cadence (the tickrate), decoupled from the render
+    /// framerate, using an accumulator in the `TimeManager`. May run zero, one,
+    /// or several times per rendered frame.
+    ///
+    /// Put deterministic simulation here: physics, and **all** networking
+    /// (poll inbound events, step the authoritative world, broadcast state).
+    /// `ctx.fixed_delta()` is constant; `ctx.fixed_tick()` is a monotonic tick
+    /// counter — tag inputs/snapshots with it for prediction/reconciliation.
+    ///
+    /// This is the **only** game callback invoked in headless/server mode.
+    /// Default is a no-op so non-networked games need not implement it.
+    fn on_fixed_update(&mut self, _ctx: &mut dyn GameContext<Self::Action>) {}
+
+    /// Called every rendered frame before rendering. Update visual/interpolated
+    /// state here. Not invoked in headless/server mode.
     fn on_update(&mut self, ctx: &mut dyn GameContext<Self::Action>);
 
-    /// Called every frame after `on_update`. Issue draw calls here.
+    /// Called every rendered frame after `on_update`. Issue draw calls here.
+    /// Not invoked in headless/server mode.
     fn on_render(&mut self, ctx: &mut dyn GameContext<Self::Action>);
 }
 
@@ -68,10 +86,32 @@ pub trait GameContext<A: InputAction> {
     fn should_exit(&self) -> bool;
 
     /// Seconds elapsed between the two most recent frames (delta time).
+    ///
+    /// Use in `on_update` for frame-rate-dependent visuals. Inside
+    /// `on_fixed_update`, prefer [`fixed_delta`](Self::fixed_delta).
     fn delta_time(&self) -> f64;
+
+    /// The constant timestep of the fixed-update loop, in seconds (e.g. `1/60`).
+    ///
+    /// This is the dt to integrate with inside `on_fixed_update` for
+    /// deterministic, framerate-independent simulation.
+    fn fixed_delta(&self) -> f64;
+
+    /// Monotonic count of fixed-update ticks since startup.
+    ///
+    /// Stamp inputs and snapshots with this for client-side prediction and
+    /// server reconciliation (see [`SequenceBuffer`](crate::net::SequenceBuffer)).
+    fn fixed_tick(&self) -> u64;
 
     /// Current FPS measurement.
     fn fps(&self) -> f64;
+
+    /// Access the networking transport.
+    ///
+    /// Always returns a valid manager — a zero-cost
+    /// [`NoOpNetwork`](crate::net::NoOpNetwork) when networking is disabled — so
+    /// game code never needs to branch on whether the net is configured.
+    fn network(&mut self) -> &mut dyn NetworkManager;
 
     /// Width of the rendering surface in pixels.
     fn surface_width(&self) -> u32;
