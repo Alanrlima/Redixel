@@ -61,12 +61,32 @@ jobs:
           subcommand: clippy
           args: '-- -D warnings'
 
+      - name: Lint Networking Crates (net feature)
+        uses: ./.github/actions/cargo-each
+        with:
+          subcommand: clippy
+          root-flag: '-p redixel-core -p redixel-net -p redixel-runtime -p redixel'
+          args: '--features redixel-runtime/net,redixel/net --all-targets -- -D warnings'
+          skip-examples: 'true'
+
       - name: Run Tests (Linux)
         if: runner.os == 'Linux'
         uses: ./.github/actions/cargo-each
         with:
           subcommand: test
           args: '--verbose'
+          xvfb: 'true'
+        env:
+          WGPU_BACKEND: vulkan
+
+      - name: Test Networking Crates (net feature, Linux)
+        if: runner.os == 'Linux'
+        uses: ./.github/actions/cargo-each
+        with:
+          subcommand: test
+          root-flag: '-p redixel-core -p redixel-net -p redixel-runtime -p redixel'
+          args: '--features redixel-runtime/net,redixel/net --verbose'
+          skip-examples: 'true'
           xvfb: 'true'
         env:
           WGPU_BACKEND: vulkan
@@ -85,6 +105,15 @@ jobs:
           subcommand: test
           args: '--verbose'
 
+      - name: Test Networking Crates (net feature, Windows)
+        if: runner.os == 'Windows'
+        uses: ./.github/actions/cargo-each
+        with:
+          subcommand: test
+          root-flag: '-p redixel-core -p redixel-net -p redixel-runtime -p redixel'
+          args: '--features redixel-runtime/net,redixel/net --verbose'
+          skip-examples: 'true'
+
       - name: Build Executables (Windows)
         if: runner.os == 'Windows'
         uses: ./.github/actions/cargo-each
@@ -98,6 +127,15 @@ jobs:
         with:
           subcommand: test
           args: '--verbose'
+
+      - name: Test Networking Crates (net feature, macOS)
+        if: runner.os == 'macOS'
+        uses: ./.github/actions/cargo-each
+        with:
+          subcommand: test
+          root-flag: '-p redixel-core -p redixel-net -p redixel-runtime -p redixel'
+          args: '--features redixel-runtime/net,redixel/net --verbose'
+          skip-examples: 'true'
 
       - name: Build Executables (macOS)
         if: runner.os == 'macOS'

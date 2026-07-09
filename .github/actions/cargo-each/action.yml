@@ -29,6 +29,10 @@ inputs:
     description: 'Wrap each invocation in xvfb-run (Linux GPU/window tests)'
     required: false
     default: 'false'
+  skip-examples:
+    description: 'Skip the examples/*/Cargo.toml loop, running only the root invocation'
+    required: false
+    default: 'false'
 
 runs:
   using: composite
@@ -49,6 +53,10 @@ runs:
 
         if [ "${{ inputs.skip-root }}" != "true" ]; then
           $RUNNER cargo ${{ inputs.subcommand }} ${{ inputs.root-flag }} $TARGET_FLAG ${{ inputs.args }}
+        fi
+
+        if [ "${{ inputs.skip-examples }}" = "true" ]; then
+          exit 0
         fi
 
         for manifest in examples/*/Cargo.toml; do
