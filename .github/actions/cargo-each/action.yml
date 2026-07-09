@@ -1,0 +1,69 @@
+name: 'Cargo Each'
+description: 'Runs a cargo subcommand against the root workspace and every examples/*/Cargo.toml'
+
+inputs:
+  subcommand:
+    description: 'cargo subcommand, e.g. build, test, clippy, fmt'
+    required: true
+  args:
+    description: 'Extra args appended to each invocation, e.g. "-- -D warnings"'
+    required: false
+    default: ''
+  target:
+    description: 'Optional --target triple'
+    required: false
+    default: ''
+  skip-root:
+    description: 'Skip the root workspace invocation'
+    required: false
+    default: 'false'
+  root-flag:
+    description: 'Flag for the root invocation (default --workspace; pass empty for subcommands like fmt that already check the whole workspace and reject --workspace)'
+    required: false
+    default: '--workspace'
+  exclude:
+    description: 'Space-separated example names to skip (e.g. "shooter_mp")'
+    required: false
+    default: ''
+  xvfb:
+    description: 'Wrap each invocation in xvfb-run (Linux GPU/window tests)'
+    required: false
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        set -euo pipefail
+
+        TARGET_FLAG=""
+        if [ -n "${{ inputs.target }}" ]; then
+          TARGET_FLAG="--target ${{ inputs.target }}"
+        fi
+
+        RUNNER=""
+        if [ "${{ inputs.xvfb }}" = "true" ]; then
+          RUNNER="xvfb-run --auto-servernum"
+        fi
+
+        if [ "${{ inputs.skip-root }}" != "true" ]; then
+          $RUNNER cargo ${{ inputs.subcommand }} ${{ inputs.root-flag }} $TARGET_FLAG ${{ inputs.args }}
+        fi
+
+        for manifest in examples/*/Cargo.toml; do
+          name=$(basename "$(dirname "$manifest")")
+          skip=false
+
+          for ex in ${{ inputs.exclude }}; do
+            if [ "$name" = "$ex" ]; then
+              skip=true
+            fi
+          done
+
+          if [ "$skip" = true ]; then
+            continue
+          fi
+
+          $RUNNER cargo ${{ inputs.subcommand }} --manifest-path "$manifest" $TARGET_FLAG ${{ inputs.args }}
+        done
