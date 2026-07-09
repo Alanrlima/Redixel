@@ -86,11 +86,19 @@ impl Game for Triangle3d {
     }
 }
 
-#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+#[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))]
 pub fn desktop_main() -> Result<(), RedixelError> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     redixel::run_desktop(Triangle3d::default())?;
     Ok(())
+}
+
+#[cfg(target_os = "ios")]
+#[unsafe(no_mangle)]
+pub extern "C" fn ios_main() {
+    if let Err(e) = redixel::run_ios(Triangle3d::default()) {
+        log::error!("Engine error: {e:?}");
+    }
 }
 
 #[cfg(target_arch = "wasm32")]

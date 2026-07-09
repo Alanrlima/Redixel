@@ -1,5 +1,5 @@
 fn main() {
-    #[cfg(not(any(target_os = "android", target_arch = "wasm32")))]
+    #[cfg(not(any(target_os = "android", target_arch = "wasm32", target_os = "ios")))]
     if let Err(e) = triangle_3d::desktop_main() {
         eprintln!("Engine error: {e:?}");
         std::process::exit(0);
