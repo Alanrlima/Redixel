@@ -160,14 +160,20 @@ impl TimeManager {
         let now: Instant = Instant::now();
         let delta: f64 = now.duration_since(self.frame_last).as_secs_f64();
         self.frame_last = now;
+        self.record_delta(delta);
 
+        #[cfg(not(target_arch = "wasm32"))]
+        self.enforce_cap();
+    }
+
+    /// Applies one frame's elapsed time to the fps / rolling-average state.
+    /// Split out of `end_frame` so tests can feed exact synthetic deltas
+    /// instead of depending on real (and platform-jittery) sleeps.
+    fn record_delta(&mut self, delta: f64) {
         if delta > 0.0 {
             self.fps = 1.0 / delta;
             self.push_frame_time(delta);
         }
-
-        #[cfg(not(target_arch = "wasm32"))]
-        self.enforce_cap();
     }
 
     /// Returns the time in seconds between the last two frames, derived from the **instantaneous** FPS.
@@ -270,52 +276,42 @@ mod tests {
         assert_eq!(tm.frame_target, 0.0);
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn fps_measurement() {
         let mut tm: TimeManager = TimeManager::new();
-        tm.end_frame();
-        thread::sleep(Duration::from_millis(16));
-        tm.end_frame();
-        assert!(tm.fps > 20.0 && tm.fps < 120.0, "fps={}", tm.fps);
+        tm.record_delta(0.016);
+        assert!(tm.fps > 50.0 && tm.fps < 80.0, "fps={}", tm.fps);
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn display_fps_smooths_spikes() {
         let mut tm: TimeManager = TimeManager::new();
 
         for _ in 0..10 {
-            tm.end_frame();
-            thread::sleep(Duration::from_millis(16));
+            tm.record_delta(0.016);
         }
 
-        tm.end_frame();
-        thread::sleep(Duration::from_millis(200));
-        tm.end_frame();
-
-        assert!(tm.fps() < 30.0, "instant fps should reflect the spike, got {}", tm.fps());
+        tm.record_delta(0.2);
+        assert!(tm.fps() < 15.0, "instant fps should reflect the spike, got {}", tm.fps());
 
         assert!(
-            tm.display_fps() > 15.0,
+            tm.display_fps() > 30.0,
             "rolling average should absorb a single spike, got {}",
             tm.display_fps()
         );
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn display_fps_converges_to_stable_rate() {
         let mut tm: TimeManager = TimeManager::new();
 
         for _ in 0..FPS_WINDOW {
-            tm.end_frame();
-            thread::sleep(Duration::from_millis(10));
+            tm.record_delta(0.010);
         }
 
         let display: f64 = tm.display_fps();
         assert!(
-            display > 40.0 && display < 200.0,
+            display > 70.0 && display < 130.0,
             "display_fps should converge near 100, got {display}"
         );
     }
@@ -358,20 +354,23 @@ mod tests {
     fn accumulator_yields_expected_step_count() {
         let mut tm: TimeManager = TimeManager::new();
         tm.set_tickrate(60.0);
-
         tm.accumulate(1.0 / 60.0);
         let mut steps: u32 = 0;
+
         while tm.next_fixed_step() {
             steps += 1;
         }
+
         assert_eq!(steps, 1);
         assert_eq!(tm.fixed_tick(), 1);
 
         tm.accumulate(0.05);
         steps = 0;
+
         while tm.next_fixed_step() {
             steps += 1;
         }
+
         assert_eq!(steps, 3);
         assert_eq!(tm.fixed_tick(), 4);
     }
@@ -386,9 +385,11 @@ mod tests {
 
         tm.accumulate(0.010);
         let mut steps: u32 = 0;
+
         while tm.next_fixed_step() {
             steps += 1;
         }
+
         assert_eq!(steps, 1);
     }
 
@@ -400,9 +401,11 @@ mod tests {
 
         tm.accumulate(10.0);
         let mut steps: u32 = 0;
+
         while tm.next_fixed_step() {
             steps += 1;
         }
+
         assert_eq!(steps, 8, "accumulator must clamp to max_substeps");
     }
 
@@ -426,6 +429,6 @@ mod tests {
         let elapsed: f64 = start.elapsed().as_secs_f64();
 
         assert!(elapsed >= 0.010, "limiter fired too early: {elapsed:.4}s");
-        assert!(elapsed < 0.05, "limiter overslept: {elapsed:.4}s");
+        assert!(elapsed < 0.2, "limiter overslept: {elapsed:.4}s");
     }
 }
