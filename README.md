@@ -15,6 +15,7 @@ Redixel is built on top of the modern Rust ecosystem, prioritizing safety and cr
 | **Language**     | Rust (2024) | Memory safety and performance without garbage collection.              |
 | **Windowing**    | Winit       | Event loop management and low-level platform abstraction.              |
 | **Graphics**     | WGPU        | Portable graphics API targeting Vulkan, Metal, DX12, and WebGL/WebGPU. |
+| **Networking**   | WebTransport (`wtransport`) | QUIC/HTTP-3 transport unifying reliable and unreliable delivery on one encrypted connection. |
 | **Build System** | Cargo       | Standard Rust package manager and build tool.                          |
 
 ## Getting Started
@@ -262,6 +263,7 @@ redixel/
 │   ├── redixel-platform/       # Winit: window, input, web-sys DOM injection
 │   ├── redixel-renderer/       # Wgpu: GPU device, render pass, commands
 │   ├── redixel-runtime/        # Loop, AppState, TimeManager, Settings
+│   ├── redixel-net/            # NetworkManager transports (WebTransport, loopback)
 │   └── redixel/                # Public facade API (pub use ...)
 └── examples/
     ├── pong/                   # Classic 2D game demonstrating input and physics
@@ -273,7 +275,6 @@ redixel/
 
 ## Roadmap
 
-The project is currently in Phase 2 (The Graphics Core).
 For a detailed breakdown of upcoming features, including Batch Rendering, ECS, and Physics, please refer to the [ROADMAP](./ROADMAP.md).
 
 ## Contributing
