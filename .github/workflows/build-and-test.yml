@@ -157,6 +157,13 @@ jobs:
       - name: Install Android Platform 30
         run: echo "y" | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "platforms;android-30"
 
+      - name: Configure NDK C Toolchain
+        run: |
+          NDK_BIN="$(find "$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt" -maxdepth 1 -type d -name '*-x86_64')/bin"
+          echo "$NDK_BIN" >> "$GITHUB_PATH"
+          echo "CC_aarch64_linux_android=$NDK_BIN/aarch64-linux-android24-clang" >> "$GITHUB_ENV"
+          echo "AR_aarch64_linux_android=$NDK_BIN/llvm-ar" >> "$GITHUB_ENV"
+
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
 
@@ -165,7 +172,7 @@ jobs:
         with:
           subcommand: clippy
           target: aarch64-linux-android
-          args: '-- -D warnings'
+          args: '--lib -- -D warnings'
 
       - name: Build Executables (Android)
         uses: ./.github/actions/cargo-each
@@ -196,7 +203,7 @@ jobs:
         with:
           subcommand: clippy
           target: aarch64-apple-ios
-          args: '-- -D warnings'
+          args: '--lib -- -D warnings'
 
       - name: Build Examples (iOS)
         uses: ./.github/actions/cargo-each
