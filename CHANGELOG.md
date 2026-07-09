@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),  
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.0]
+
+### Added
+
+- **Networking Core (`redixel-core::net`):**
+  - Introduced the backend-agnostic `NetworkManager` trait exposed via `ctx.network()`, covering `poll()` (drains `Connected`/`Disconnected`/`Message` events with zero-allocation borrowed payloads), `send`/`broadcast` over two delivery guarantees (`NetworkChannel::ReliableOrdered`, `UnreliableSequenced`), `rtt()`, `is_connected()`, and `server_tickrate()` for automatic client tickrate adoption.
+  - Added `ClientId`/`SERVER_ID`, `NoOpNetwork` (zero-cost default when no transport is configured), and `SequenceBuffer<T>` — a fixed-capacity ring buffer for client-side prediction/reconciliation.
+  - `Game::on_fixed_update` (default no-op) plus `GameContext::fixed_delta()`/`fixed_tick()`, run on a deterministic accumulator so simulation and network ticks stay decoupled from render framerate.
+- **`redixel-net` crate — WebTransport transport:**
+  - New crate implementing `NetworkManager` over **WebTransport (QUIC/HTTP-3)** via `wtransport`, unifying reliable and unreliable delivery on one encrypted connection: framed reliable streams for `ReliableOrdered`, and datagrams with RFC 1982 sequence framing (newest-wins, stale-drop) for `UnreliableSequenced`.
+  - `NetConfig`/`NetMode` (`Server`/`Client`/`Offline`) with `CertSource::SelfSigned` (LAN/self-host) and `CertSource::Pem` (production domain certs); a handshake welcome frame assigns each client its `ClientId` and negotiates the server's authoritative tickrate.
+  - `LoopbackNetwork` — an in-process server/client pair for tests and single-process hosting, exercising the same channel/sequencing semantics as the real transport.
+- **Headless / Dedicated Server mode:** `RuntimeConfig::headless()` and the new `HeadlessRuntime` run the engine with no `winit`/`wgpu`, driving only `on_start` and the fixed-update loop — the same `Game` implementation runs unmodified as an authoritative Linux VPS server. `RuntimeConfig::with_net()` enables networking on any configuration.
+- **Multiplayer example:** A new authoritative-server multiplayer twin-stick shooter demo (headless server + windowed client) demonstrating the full stack end-to-end — snapshot broadcast, reliable player input, weapons/powerups/effects replication, and Android/iOS mobile client support.
+- **`net` Cargo feature:** `redixel-net` is now an optional, feature-gated dependency (`redixel`/`redixel-runtime` crates) so games that don't need networking pay zero cost for it.
+- `EngineSettings::load_config_json()` helper and a new `engine.tickrate` key in `config/config.json`.
+- `TimeManager::interpolation_alpha()` (render-time interpolation support) and `set_max_substeps()` (spiral-of-death clamp, now configurable).
+- **CI:** Added a `macOS` entry to the `Desktop` job matrix (build + test + clippy on `macos-latest`) and a new dedicated `iOS` job (clippy + `--lib` build of every example for `aarch64-apple-ios`).
+- **CI: extended example coverage to every job.** `format`, `desktop`, and `wasm` invoke `--workspace`/check the root package, which no longer includes `examples/*` after the workspace restructuring above — only `android`/`ios` were already per-package (`cargo apk build`/`--manifest-path`). Added a reusable composite action (`.github/actions/cargo-each`) that runs a cargo subcommand against the root workspace and every `examples/*/Cargo.toml`, wired into all five jobs. Networked examples with heavier native dependencies are no longer excluded from the Android/iOS build steps — only the WASM job still excludes examples that don't support that target.
+- `staticlib` added to every example's `crate-type` (alongside `cdylib`/`rlib`) — the crate now also builds as a static library, the standard way to embed a Rust library in an Xcode project.
+- **iOS entry point:** `redixel::run_ios`/`run_ios_with`, using the portable `EventLoop::run_app` (winit has no `run_app_on_demand` on iOS — that's desktop-only) so no `unsafe` is needed at that layer. Each example exposes a `#[unsafe(no_mangle)] extern "C" fn ios_main()` — the same idea as Android's JNI-loaded `android_main`, just via a different OS-level mechanism. Unlike desktop/WASM, this is *not* reached through the crate's own `fn main()`: `UIApplicationMain` must be called before anything else touches UIKit, so winit needs to own the actual process entry — the exported symbol is meant to be called from an Xcode project with no competing `main.swift`/`AppDelegate`.
+
+### Changed
+
+- **Workspace restructuring:** Examples are no longer members of the root Cargo workspace — each is now its own standalone, nested workspace with an independent `Cargo.lock`. This decouples the engine's build/test graph from per-example dependencies, at the cost of needing `--manifest-path examples/<name>/Cargo.toml` (rather than `-p <name>`) to target a specific example from the repo root.
+- **`redixel-runtime` internals:** Extracted the shared fixed-step loop (timing → network update → `on_fixed_update` → network flush) into a new internal `SimulationCore`, used identically by the windowed `Runtime` and the new `HeadlessRuntime`.
+- Updated `README.md`: all example commands now use `--manifest-path` per the workspace restructuring above; added a **Multiplayer** section documenting the authoritative-server/client workflow and required firewall port; added a Wayland/XWayland performance note; added a **Running on iOS** section.
+- `deploy-frontend.yml`: switched WASM example discovery from `cargo metadata` (which no longer sees examples now that they've left the root workspace) to a direct `grep` over `examples/*/Cargo.toml`.
+- `Cargo.lock` is no longer tracked at the repository root — `crates/*` is a pure-library workspace, where Cargo's own guidance is to omit the lockfile since downstream consumers resolve their own. Each `examples/*` package **does** commit its own `Cargo.lock`, since those are applications (native/WASM/APK build artifacts distributed to end users), where pinned, reproducible dependency versions matter; `.gitignore` updated accordingly.
+
 ## [0.2.0]
 
 ### Added
