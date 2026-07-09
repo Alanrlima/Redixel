@@ -175,7 +175,7 @@ jobs:
           skip-root: 'true'
 
   ios:
-    name: iOS
+    name: iOS (Static Lib)
     needs: format
     runs-on: macos-latest
 
