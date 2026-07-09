@@ -1,12 +1,13 @@
+#[cfg(not(target_arch = "wasm32"))]
+use std::{
+    thread,
+    time::{Duration, Instant},
+};
+
 #[cfg(target_arch = "wasm32")]
 use web_time::Instant;
 
-#[cfg(not(target_arch = "wasm32"))]
-use std::thread;
-#[cfg(not(target_arch = "wasm32"))]
-use std::time::Duration;
-#[cfg(not(target_arch = "wasm32"))]
-use std::time::Instant;
+use crate::runtime::DEFAULT_TICKRATE;
 
 /// How long before the deadline we switch from `thread::sleep` to a spin-loop.
 /// 2 ms balances CPU burn against precision on most operating systems.
@@ -15,6 +16,11 @@ const SPIN_THRESHOLD: f64 = 0.002;
 
 /// Number of recent frame times kept for the rolling average used by [`TimeManager::display_fps`].
 const FPS_WINDOW: usize = 60;
+
+/// Upper bound on fixed steps run per frame. Prevents the "spiral of death":
+/// after a long stall the accumulator is clamped instead of running an
+/// unbounded catch-up burst that would stall the frame even further.
+const DEFAULT_MAX_SUBSTEPS: u32 = 8;
 
 /// Tracks frame timing and enforces an optional FPS cap.
 ///
@@ -39,6 +45,10 @@ pub struct TimeManager {
     frame_times: [f64; FPS_WINDOW],
     frame_times_idx: usize,
     frame_times_filled: usize,
+    fixed_step: f64,
+    accumulator: f64,
+    max_substeps: u32,
+    fixed_tick: u64,
 }
 
 impl TimeManager {
@@ -53,12 +63,89 @@ impl TimeManager {
             frame_times: [0.0; FPS_WINDOW],
             frame_times_idx: 0,
             frame_times_filled: 0,
+            fixed_step: 1.0 / DEFAULT_TICKRATE,
+            accumulator: 0.0,
+            max_substeps: DEFAULT_MAX_SUBSTEPS,
+            fixed_tick: 0,
         }
     }
 
     /// Sets the FPS cap. Pass `0.0` (or any non-positive value) to uncap.
     pub fn set_target_fps(&mut self, target_fps: f64) {
         self.frame_target = if target_fps > 0.0 { 1.0 / target_fps } else { 0.0 };
+    }
+
+    /// Sets the fixed-update tickrate in Hz (e.g. `60.0`). Non-positive values
+    /// are ignored, keeping the previous step. Resets nothing else — safe to
+    /// call before the loop starts.
+    pub fn set_tickrate(&mut self, hz: f64) {
+        if hz > 0.0 {
+            self.fixed_step = 1.0 / hz;
+        } else {
+            log::warn!("Ignoring non-positive tickrate {hz}; keeping {} Hz.", 1.0 / self.fixed_step);
+        }
+    }
+
+    /// Caps the number of fixed steps consumed per frame (spiral-of-death guard).
+    /// Must be at least 1.
+    pub fn set_max_substeps(&mut self, max: u32) {
+        self.max_substeps = max.max(1);
+    }
+
+    /// Feeds elapsed real time into the fixed-step accumulator.
+    ///
+    /// Call once per frame (after measuring the frame delta). Excess time beyond
+    /// `max_substeps` worth of steps is discarded so a hitch can never trigger
+    /// an unbounded catch-up burst.
+    pub fn accumulate(&mut self, frame_delta: f64) {
+        self.accumulator += frame_delta;
+
+        let ceiling: f64 = self.fixed_step * self.max_substeps as f64;
+        if self.accumulator > ceiling {
+            self.accumulator = ceiling;
+        }
+    }
+
+    /// Drives the fixed-update loop. Returns `true` and consumes one fixed step
+    /// (advancing [`fixed_tick`](Self::fixed_tick)) while a full step is owed,
+    /// `false` once the accumulator is drained below one step.
+    ///
+    /// ```ignore
+    /// time.accumulate(frame_delta);
+    /// while time.next_fixed_step() {
+    ///     game.on_fixed_update(ctx);
+    /// }
+    /// ```
+    pub fn next_fixed_step(&mut self) -> bool {
+        if self.accumulator >= self.fixed_step {
+            self.accumulator -= self.fixed_step;
+            self.fixed_tick += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// The constant duration of one fixed step, in seconds. Pass this as `dt`
+    /// to deterministic simulation inside `on_fixed_update`.
+    pub fn fixed_delta(&self) -> f64 {
+        self.fixed_step
+    }
+
+    /// Monotonic count of fixed steps consumed since startup.
+    pub fn fixed_tick(&self) -> u64 {
+        self.fixed_tick
+    }
+
+    /// Fraction `[0, 1)` of the way into the next fixed step, for interpolating
+    /// rendered visuals between the two most recent simulation states and
+    /// avoiding stutter when render and tick rates differ.
+    pub fn interpolation_alpha(&self) -> f64 {
+        if self.fixed_step > 0.0 {
+            (self.accumulator / self.fixed_step).clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
     }
 
     /// Call at the **start** of every frame, before any rendering work.
@@ -83,7 +170,7 @@ impl TimeManager {
         self.enforce_cap();
     }
 
-    /// Returns the time in seconds between the last two frames. Uses the **instantaneous** FPS
+    /// Returns the time in seconds between the last two frames, derived from the **instantaneous** FPS.
     pub fn delta_time(&self) -> f64 {
         if self.fps > 0.0 { 1.0 / self.fps } else { 0.0 }
     }
@@ -245,6 +332,86 @@ mod tests {
         thread::sleep(Duration::from_millis(60));
         tm.every_seconds(0.05, |_: f64| fired = true);
         assert!(fired);
+    }
+
+    #[test]
+    fn fixed_step_defaults_to_60hz() {
+        let tm: TimeManager = TimeManager::new();
+        const EPS: f64 = 1e-9;
+        assert!((tm.fixed_delta() - 1.0 / 60.0).abs() < EPS);
+        assert_eq!(tm.fixed_tick(), 0);
+    }
+
+    #[test]
+    fn set_tickrate_changes_step() {
+        let mut tm: TimeManager = TimeManager::new();
+        const EPS: f64 = 1e-9;
+
+        tm.set_tickrate(30.0);
+        assert!((tm.fixed_delta() - 1.0 / 30.0).abs() < EPS);
+
+        tm.set_tickrate(0.0);
+        assert!((tm.fixed_delta() - 1.0 / 30.0).abs() < EPS);
+    }
+
+    #[test]
+    fn accumulator_yields_expected_step_count() {
+        let mut tm: TimeManager = TimeManager::new();
+        tm.set_tickrate(60.0);
+
+        tm.accumulate(1.0 / 60.0);
+        let mut steps: u32 = 0;
+        while tm.next_fixed_step() {
+            steps += 1;
+        }
+        assert_eq!(steps, 1);
+        assert_eq!(tm.fixed_tick(), 1);
+
+        tm.accumulate(0.05);
+        steps = 0;
+        while tm.next_fixed_step() {
+            steps += 1;
+        }
+        assert_eq!(steps, 3);
+        assert_eq!(tm.fixed_tick(), 4);
+    }
+
+    #[test]
+    fn accumulator_carries_remainder_between_frames() {
+        let mut tm: TimeManager = TimeManager::new();
+        tm.set_tickrate(60.0);
+
+        tm.accumulate(0.010);
+        assert!(!tm.next_fixed_step(), "single sub-step frame must not tick");
+
+        tm.accumulate(0.010);
+        let mut steps: u32 = 0;
+        while tm.next_fixed_step() {
+            steps += 1;
+        }
+        assert_eq!(steps, 1);
+    }
+
+    #[test]
+    fn accumulator_clamps_under_stall() {
+        let mut tm: TimeManager = TimeManager::new();
+        tm.set_tickrate(60.0);
+        tm.set_max_substeps(8);
+
+        tm.accumulate(10.0);
+        let mut steps: u32 = 0;
+        while tm.next_fixed_step() {
+            steps += 1;
+        }
+        assert_eq!(steps, 8, "accumulator must clamp to max_substeps");
+    }
+
+    #[test]
+    fn interpolation_alpha_tracks_partial_step() {
+        let mut tm: TimeManager = TimeManager::new();
+        tm.set_tickrate(100.0);
+        tm.accumulate(0.005);
+        assert!((tm.interpolation_alpha() - 0.5).abs() < 1e-6);
     }
 
     #[cfg(not(target_arch = "wasm32"))]

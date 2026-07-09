@@ -3,6 +3,9 @@ use std::sync::{
     mpsc::{Receiver, Sender},
 };
 
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Duration;
+
 use winit::{
     application::ApplicationHandler,
     dpi::PhysicalSize,
@@ -13,20 +16,161 @@ use winit::{
 
 use wgpu::SurfaceError;
 
-use redixel_core::{Game, RedixelError, game::GameContext};
+use redixel_core::{Game, RedixelError, game::GameContext, net::NetworkManager};
+#[cfg(feature = "net")]
+use redixel_net::NetConfig;
 use redixel_platform::{WindowManager, window::WindowConfig};
 use redixel_renderer::{Renderer, RendererConfig};
 
 use crate::{
     context::{Context, DrawCommand},
+    settings::EngineSettings,
+    simulation::{SimulationCore, StepFlow},
     time::TimeManager,
 };
+
+pub const DEFAULT_TICKRATE: f64 = 60.0;
 
 #[derive(Clone)]
 pub struct RuntimeConfig {
     pub window: WindowConfig,
     pub renderer: RendererConfig,
     pub target_fps: f64,
+    /// Fixed-update rate in Hz driving `on_fixed_update` (physics/networking).
+    pub tickrate: f64,
+    /// Networking configuration. `None` installs a zero-cost no-op network.
+    #[cfg(feature = "net")]
+    pub net: Option<NetConfig>,
+}
+
+impl RuntimeConfig {
+    /// A configuration for a **headless server**: no window, no GPU, just a
+    /// fixed-update tick driving simulation. The window/renderer fields are
+    /// placeholders never touched by [`HeadlessRuntime`]. `tickrate` follows
+    /// the same `config.json` (`engine.tickrate`) fallback as the windowed
+    /// path, defaulting to [`DEFAULT_TICKRATE`] when the file or key is
+    /// absent. Enable networking with [`with_net`](Self::with_net).
+    pub fn headless() -> Self {
+        EngineSettings::load_config_json();
+
+        let tickrate: f64 = EngineSettings::global_read().get_path("engine.tickrate", DEFAULT_TICKRATE);
+
+        Self {
+            target_fps: 0.0,
+            tickrate,
+            #[cfg(feature = "net")]
+            net: None,
+            window: WindowConfig {
+                title: String::from("redixel-headless"),
+                width: 0,
+                height: 0,
+                fullscreen: false,
+            },
+            renderer: RendererConfig::default(),
+        }
+    }
+
+    /// Enables networking on this configuration with the given transport role.
+    #[cfg(feature = "net")]
+    pub fn with_net(mut self, net: NetConfig) -> Self {
+        self.net = Some(net);
+        self
+    }
+
+    /// Builds the network manager described by the config, or a no-op when
+    /// networking is disabled (feature off or no [`net`](Self::net) set).
+    pub(crate) fn build_network(&self) -> Box<dyn NetworkManager> {
+        #[cfg(feature = "net")]
+        {
+            match &self.net {
+                Some(cfg) => redixel_net::build(cfg, self.tickrate),
+                None => Box::new(redixel_core::net::NoOpNetwork),
+            }
+        }
+        #[cfg(not(feature = "net"))]
+        {
+            Box::new(redixel_core::net::NoOpNetwork)
+        }
+    }
+}
+
+/// Runs a game **headless** (server mode): no `winit`, no `wgpu`. Drives only
+/// `on_start` then a fixed-rate `on_fixed_update` loop (networking + physics),
+/// pacing each tick with a sleep to keep CPU/RAM minimal on a VPS. `on_update`
+/// and `on_render` never fire.
+///
+/// The same `Game` implementation runs here and in the windowed [`Runtime`] —
+/// only the rendering callbacks are skipped.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct HeadlessRuntime<G: Game> {
+    sim: SimulationCore<G>,
+    tickrate: f64,
+    tick_dur: Duration,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<G: Game> HeadlessRuntime<G> {
+    /// Builds a headless runner from `config`, installing the configured network
+    /// transport. A non-positive tickrate falls back to [`DEFAULT_TICKRATE`].
+    pub fn new(game: G, config: RuntimeConfig) -> Self {
+        let tickrate: f64 = if config.tickrate > 0.0 {
+            config.tickrate
+        } else {
+            DEFAULT_TICKRATE
+        };
+
+        let mut time: TimeManager = TimeManager::new();
+        time.set_tickrate(tickrate);
+
+        let context: Context<G::Action> = Context::with_network(config.build_network());
+        let tick_dur: Duration = Duration::from_secs_f64(1.0 / tickrate);
+
+        Self {
+            sim: SimulationCore::new(time, context, game),
+            tickrate,
+            tick_dur,
+        }
+    }
+
+    /// Runs `on_start`, then the fixed-update loop until the game calls
+    /// `ctx.exit()`. Blocks the calling thread; returns any fatal game error.
+    pub fn run(mut self) -> Result<(), RedixelError> {
+        use std::thread::sleep;
+        use std::time::Instant;
+
+        self.sim.start()?;
+
+        let mut last: Instant = Instant::now();
+        log::info!("Headless runtime started at {} Hz.", self.tickrate);
+
+        loop {
+            let now: Instant = Instant::now();
+            let frame_delta: f64 = now.duration_since(last).as_secs_f64();
+            last = now;
+
+            match self.sim.run_fixed_updates(frame_delta) {
+                StepFlow::Exit => {
+                    log::info!("Headless runtime stopping (game requested shutdown).");
+                    return Ok(());
+                }
+                StepFlow::Fatal(e) => return Err(e),
+                StepFlow::Continue => {}
+            }
+
+            self.sim.context.reset_frame();
+
+            let work: Duration = Instant::now().duration_since(now);
+            if work < self.tick_dur {
+                sleep(self.tick_dur - work);
+            }
+        }
+    }
+}
+
+/// Thin convenience wrapper around [`HeadlessRuntime::new`] + [`HeadlessRuntime::run`].
+#[cfg(not(target_arch = "wasm32"))]
+pub fn run_headless<G: Game>(game: G, config: RuntimeConfig) -> Result<(), RedixelError> {
+    HeadlessRuntime::new(game, config).run()
 }
 
 type BridgePayload = Result<(Renderer, WindowManager), RedixelError>;
@@ -34,9 +178,7 @@ type BridgePayload = Result<(Renderer, WindowManager), RedixelError>;
 struct RunningState<G: Game> {
     renderer: Renderer,
     window: WindowManager,
-    time: TimeManager,
-    context: Context<G::Action>,
-    game: G,
+    sim: SimulationCore<G>,
 }
 
 enum AppState<G: Game> {
@@ -82,26 +224,23 @@ impl<G: Game> Runtime<G> {
         event_loop.exit();
     }
 
-    fn transition_to_running(&mut self, renderer: Renderer, window: WindowManager) {
+    fn transition_to_running(&mut self, renderer: Renderer, window: WindowManager) -> Result<(), RedixelError> {
         window.request_redraw();
 
         let mut time: TimeManager = TimeManager::new();
         time.set_target_fps(self.config.target_fps);
+        time.set_tickrate(self.config.tickrate);
 
         let initial_size: PhysicalSize<u32> = window.surface_size();
-        let mut context: Context<G::Action> = Context::new();
+        let mut context: Context<G::Action> = Context::with_network(self.config.build_network());
         context.update_state(initial_size.width, initial_size.height);
 
-        let mut game: G = self.pending_game.take().expect("pending_game already consumed");
-        game.on_start(&mut context);
+        let game: G = self.pending_game.take().expect("pending_game already consumed");
+        let mut sim: SimulationCore<G> = SimulationCore::new(time, context, game);
+        sim.start()?;
 
-        self.state = AppState::Running(Box::new(RunningState {
-            renderer,
-            window,
-            time,
-            context,
-            game,
-        }));
+        self.state = AppState::Running(Box::new(RunningState { renderer, window, sim }));
+        Ok(())
     }
 
     async fn init_gpu(
@@ -148,7 +287,11 @@ impl<G: Game> Runtime<G> {
         };
 
         match payload {
-            Ok((renderer, window)) => self.transition_to_running(renderer, window),
+            Ok((renderer, window)) => {
+                if let Err(e) = self.transition_to_running(renderer, window) {
+                    self.abort(event_loop, e);
+                }
+            }
             Err(e) => self.abort(event_loop, e),
         }
     }
@@ -178,21 +321,35 @@ impl<G: Game> Runtime<G> {
             return;
         };
 
-        state.context.tick_input();
-        state.time.begin_frame();
+        state.sim.context.tick_input();
+        state.sim.time.begin_frame();
 
-        state.context.update_timing(state.time.delta_time(), state.time.fps());
-        state.game.on_update(&mut state.context);
+        let frame_delta: f64 = state.sim.time.delta_time();
+        state.sim.context.update_timing(frame_delta, state.sim.time.fps());
 
-        if state.context.should_exit() {
+        match state.sim.run_fixed_updates(frame_delta) {
+            StepFlow::Exit => {
+                event_loop.exit();
+                return;
+            }
+            StepFlow::Fatal(e) => {
+                self.fatal_error = Some(e);
+                event_loop.exit();
+                return;
+            }
+            StepFlow::Continue => {}
+        }
+
+        state.sim.game.on_update(&mut state.sim.context);
+
+        if state.sim.context.should_exit() {
             event_loop.exit();
             return;
         }
 
-        state.game.on_render(&mut state.context);
+        state.sim.game.on_render(&mut state.sim.context);
 
-        // Flush draw commands from context into renderer
-        for cmd in state.context.drain_commands() {
+        for cmd in state.sim.context.drain_commands() {
             match cmd {
                 DrawCommand::ClearColor(c) => {
                     state.renderer.set_clear_color(c);
@@ -208,9 +365,7 @@ impl<G: Game> Runtime<G> {
 
         match state.renderer.render() {
             Ok(()) => {}
-            // Transient; skip the frame silently.
             Err(RedixelError::Surface(SurfaceError::Timeout)) => {}
-            // The swap chain has been lost or is outdated; we must recreate it.
             Err(RedixelError::Surface(SurfaceError::Lost | SurfaceError::Outdated)) => {
                 state.renderer.resize(state.window.surface_size());
             }
@@ -221,9 +376,10 @@ impl<G: Game> Runtime<G> {
             }
         }
 
-        state.context.reset_frame();
-        state.time.end_frame();
+        state.sim.context.reset_frame();
+        state.sim.time.end_frame();
         state
+            .sim
             .time
             .every_seconds(1.0, |fps: f64| state.window.set_title_fps(fps));
 
@@ -246,7 +402,7 @@ impl<G: Game> Runtime<G> {
 
             WindowEvent::SurfaceResized(size) => {
                 state.renderer.resize(size);
-                state.context.update_state(size.width, size.height);
+                state.sim.context.update_state(size.width, size.height);
             }
 
             WindowEvent::RedrawRequested => {
@@ -254,7 +410,7 @@ impl<G: Game> Runtime<G> {
             }
 
             ref e => {
-                if state.context.process_input_event(e) {
+                if state.sim.context.process_input_event(e) {
                     return;
                 }
 
@@ -328,6 +484,9 @@ mod tests {
     fn mock_config() -> RuntimeConfig {
         RuntimeConfig {
             target_fps: 60.0,
+            tickrate: 60.0,
+            #[cfg(feature = "net")]
+            net: None,
             window: WindowConfig {
                 width: 800,
                 height: 600,

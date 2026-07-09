@@ -7,11 +7,18 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
+[features]
+net = ["dep:redixel-net"]
+
 [dependencies]
+# Internal crates
 redixel-core = { workspace = true }
 redixel-platform = { workspace = true }
 redixel-renderer = { workspace = true }
 redixel-math = { workspace = true }
+redixel-net = { workspace = true, optional = true }
+
+# External crates
 log = { workspace = true }
 pollster = { workspace = true }
 serde = { workspace = true }
