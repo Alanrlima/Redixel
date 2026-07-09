@@ -1,0 +1,20 @@
+[package]
+name = "redixel-net"
+description = "Platform-agnostic networking transports for the Redixel engine."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Internal crates
+redixel-core = { workspace = true }
+
+# External crates
+log = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+wtransport = { workspace = true }
+tokio = { workspace = true }
+bytes = { workspace = true }
