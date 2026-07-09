@@ -8,9 +8,15 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+# Internal crates
 redixel-core = { workspace = true }
 redixel-math = { workspace = true }
+
+# External crates
 log = { workspace = true }
 wgpu = { workspace = true }
 winit = { workspace = true }
 bytemuck = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wgpu = { workspace = true, features = ["webgl"] }

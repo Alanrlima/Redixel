@@ -1,2 +1,4 @@
-/target
 /pkg
+/target
+/Cargo.lock
+examples/*/target
