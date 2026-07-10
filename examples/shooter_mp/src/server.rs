@@ -4,9 +4,16 @@ use redixel::prelude::{ClientId, Game, GameContext, NetworkChannel, NetworkEvent
 
 use crate::proto::{
     ARENA_H, ARENA_W, AgentState, BASE_COOLDOWN, BULLET_SIZE, BULLET_SPEED, BulletState, ENTITY_SIZE, Effect,
-    EffectKind, PLAYER_SPEED, POWERUP_DURATION, POWERUP_SIZE, PlayerInput, PowerupState, RAPID_FIRE_COOLDOWN, Snapshot,
-    V2, Weapon, overlaps, rotate_vec, weapon_color,
+    EffectBatch, EffectKind, PLAYER_SPEED, POWERUP_DURATION, POWERUP_SIZE, PlayerInput, PowerupState,
+    RAPID_FIRE_COOLDOWN, Snapshot, V2, Weapon, overlaps, rotate_vec, weapon_color,
 };
+
+/// Seconds between a powerup being picked up and the next one appearing.
+const POWERUP_RESPAWN: f32 = 10.0;
+
+/// The world clock wraps here so `f32` keeps usable precision in a long-lived
+/// server process. Only cosmetic wobble and powerup placement read it.
+const TIME_WRAP: f32 = 3600.0;
 
 /// An authoritative agent owned by one connected client. Holds only simulation
 /// state; cosmetics live entirely on the client.
@@ -87,6 +94,8 @@ pub struct Server {
     agents: Vec<ServerAgent>,
     bullets: Vec<ServerBullet>,
     powerup: ServerPowerup,
+    powerup_respawn: f32,
+    powerup_cycle: usize,
     time: f32,
     effects: Vec<Effect>,
 }
@@ -102,6 +111,8 @@ impl Server {
                 weapon: Weapon::Shotgun,
                 pos: Vec2::new((ARENA_W - POWERUP_SIZE) / 2.0, 100.0),
             },
+            powerup_respawn: 0.0,
+            powerup_cycle: 0,
             time: 0.0,
             effects: Vec::new(),
         }
@@ -212,24 +223,39 @@ impl Server {
         }
     }
 
-    /// Respawns the roaming powerup on a fixed cadence, cycling its weapon.
+    /// Counts down to the next powerup and respawns it, cycling its weapon.
+    ///
+    /// Driven by an explicit countdown rather than `time % PERIOD < dt`: that
+    /// idiom silently misfires as the clock grows and `f32` steps coarsen, and
+    /// can fire on several consecutive ticks when `dt` is large.
     fn update_powerup(&mut self, dt: f32) {
-        if !self.powerup.active && self.time % 10.0 < dt {
-            self.powerup.active = true;
-            self.powerup.pos = Vec2::new((self.time * 100.0) % ARENA_W, (self.time * 50.0) % ARENA_H);
-            let weapon_cycle: usize = ((self.time / 10.0) as usize) % 4;
-            self.powerup.weapon = match weapon_cycle {
-                0 => Weapon::Shotgun,
-                1 => Weapon::Flamethrower,
-                2 => Weapon::Homing,
-                _ => Weapon::Pistol,
-            };
-            self.effects.push(Effect {
-                kind: EffectKind::PowerupSpawn,
-                pos: V2::of(self.powerup.pos + Vec2::splat(POWERUP_SIZE / 2.0)),
-                color: (255, 255, 255),
-            });
+        if self.powerup.active {
+            return;
         }
+
+        self.powerup_respawn -= dt;
+        if self.powerup_respawn > 0.0 {
+            return;
+        }
+
+        self.powerup_cycle = self.powerup_cycle.wrapping_add(1);
+        self.powerup.active = true;
+        self.powerup.pos = Vec2::new(
+            (self.time * 100.0) % (ARENA_W - POWERUP_SIZE),
+            (self.time * 50.0) % (ARENA_H - POWERUP_SIZE),
+        );
+        self.powerup.weapon = match self.powerup_cycle % 4 {
+            0 => Weapon::Shotgun,
+            1 => Weapon::Flamethrower,
+            2 => Weapon::Homing,
+            _ => Weapon::Pistol,
+        };
+
+        self.effects.push(Effect {
+            kind: EffectKind::PowerupSpawn,
+            pos: V2::of(self.powerup.pos + Vec2::splat(POWERUP_SIZE / 2.0)),
+            color: (255, 255, 255),
+        });
     }
 
     /// Applies each agent's latest input, integrates motion, fires weapons, and
@@ -302,6 +328,7 @@ impl Server {
                 agent.weapon = self.powerup.weapon;
                 agent.rapid_fire_timer = POWERUP_DURATION;
                 self.powerup.active = false;
+                self.powerup_respawn = POWERUP_RESPAWN;
                 let color: (u8, u8, u8) = weapon_color(agent.weapon);
                 self.effects.push(Effect {
                     kind: EffectKind::Powerup,
@@ -456,8 +483,8 @@ impl Server {
         self.bullets.retain(|b: &ServerBullet| !b.destroyed);
     }
 
-    /// Builds the broadcast snapshot for `tick`, draining this tick's effects.
-    fn build_snapshot(&mut self, tick: u64) -> Snapshot {
+    /// Builds the broadcast snapshot of continuous world state for `tick`.
+    fn build_snapshot(&self, tick: u64) -> Snapshot {
         let agents: Vec<AgentState> = self
             .agents
             .iter()
@@ -499,7 +526,29 @@ impl Server {
             agents,
             bullets,
             powerup,
+        }
+    }
+
+    /// Broadcasts this tick's continuous state unreliably, then any one-shot
+    /// cosmetics reliably — a lost snapshot is superseded next tick, a lost
+    /// effect would never play again.
+    fn broadcast_state(&mut self, ctx: &mut dyn GameContext<()>) {
+        let snapshot: Snapshot = self.build_snapshot(ctx.fixed_tick());
+        match postcard::to_stdvec(&snapshot) {
+            Ok(bytes) => ctx.network().broadcast(NetworkChannel::UnreliableSequenced, &bytes),
+            Err(e) => log::error!("Failed to encode snapshot: {e}"),
+        }
+
+        if self.effects.is_empty() {
+            return;
+        }
+
+        let batch: EffectBatch = EffectBatch {
             effects: take(&mut self.effects),
+        };
+        match postcard::to_stdvec(&batch) {
+            Ok(bytes) => ctx.network().broadcast(NetworkChannel::ReliableOrdered, &bytes),
+            Err(e) => log::error!("Failed to encode effects: {e}"),
         }
     }
 }
@@ -519,7 +568,7 @@ impl Game for Server {
 
     fn on_fixed_update(&mut self, ctx: &mut dyn GameContext<()>) {
         let dt: f32 = ctx.fixed_delta() as f32;
-        self.time += dt;
+        self.time = (self.time + dt) % TIME_WRAP;
 
         self.ingest_events(ctx);
         self.update_powerup(dt);
@@ -528,11 +577,7 @@ impl Game for Server {
         self.step_bullets(dt);
         self.resolve_collisions();
 
-        let snapshot: Snapshot = self.build_snapshot(ctx.fixed_tick());
-        match postcard::to_stdvec(&snapshot) {
-            Ok(bytes) => ctx.network().broadcast(NetworkChannel::UnreliableSequenced, &bytes),
-            Err(e) => log::error!("Failed to encode snapshot: {e}"),
-        }
+        self.broadcast_state(ctx);
     }
 
     fn on_update(&mut self, _ctx: &mut dyn GameContext<()>) {}

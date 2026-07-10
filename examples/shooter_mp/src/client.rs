@@ -7,10 +7,16 @@ use redixel::prelude::{
 use crate::{
     effects::{Effects, ParticleProps},
     proto::{
-        ARENA_H, ARENA_W, AgentState, BASE_COOLDOWN, ENTITY_SIZE, Effect, EffectKind, POWERUP_SIZE, PlayerInput,
-        RAPID_FIRE_COOLDOWN, Snapshot, V2, Weapon, player_color, weapon_color,
+        ARENA_H, ARENA_W, AgentState, BASE_COOLDOWN, ENTITY_SIZE, Effect, EffectBatch, EffectKind, POWERUP_SIZE,
+        PlayerInput, RAPID_FIRE_COOLDOWN, Snapshot, V2, Weapon, player_color, weapon_color,
     },
 };
+
+/// How often a dashing agent leaves an after-image behind, in seconds.
+const AFTERIMAGE_INTERVAL: f32 = 0.05;
+
+/// How often each bullet emits a trail particle, in seconds.
+const TRAIL_INTERVAL: f32 = 0.05;
 
 /// The client's input action set, bound to keyboard and mouse in `on_start`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -57,6 +63,7 @@ fn effect_props(effect: &Effect, seed: f32) -> ParticleProps {
 /// server sends, holding only local cosmetic state (particles, shake, timers).
 pub struct Client {
     latest: Option<Snapshot>,
+    last_tick: Option<u64>,
     fx: Effects,
     time: f32,
     local: Option<ClientId>,
@@ -64,6 +71,7 @@ pub struct Client {
     prev_health: HashMap<ClientId, i32>,
     local_shoot_cooldown: f32,
     afterimage_clock: f32,
+    trail_clock: f32,
 }
 
 impl Client {
@@ -71,6 +79,7 @@ impl Client {
     pub fn new() -> Self {
         Self {
             latest: None,
+            last_tick: None,
             fx: Effects::new(),
             time: 0.0,
             local: None,
@@ -78,6 +87,7 @@ impl Client {
             prev_health: HashMap::new(),
             local_shoot_cooldown: 0.0,
             afterimage_clock: 0.0,
+            trail_clock: 0.0,
         }
     }
 
@@ -102,7 +112,9 @@ impl Client {
         }
     }
 
-    /// Drains inbound events, learning the local id and applying every snapshot.
+    /// Drains inbound events, learning the local id and dispatching each message
+    /// by the channel it arrived on: continuous world state unreliably, one-shot
+    /// cosmetics reliably.
     fn receive(&mut self, ctx: &mut dyn GameContext<Action>) {
         if self.local.is_none()
             && let Some(id) = ctx.network().local_client()
@@ -117,18 +129,42 @@ impl Client {
                 NetworkEvent::Disconnected(..) => {
                     log::warn!("Disconnected from server.");
                 }
-                NetworkEvent::Message(_from, .., payload) => {
+                NetworkEvent::Message(_from, NetworkChannel::UnreliableSequenced, payload) => {
                     if let Ok(snapshot) = postcard::from_bytes::<Snapshot>(payload) {
                         self.apply_snapshot(snapshot);
+                    }
+                }
+                NetworkEvent::Message(_from, NetworkChannel::ReliableOrdered, payload) => {
+                    if let Ok(batch) = postcard::from_bytes::<EffectBatch>(payload) {
+                        self.play_effects(&batch.effects);
                     }
                 }
             }
         }
     }
 
+    /// Spawns a particle burst for each one-shot cosmetic the server sent.
+    fn play_effects(&mut self, effects: &[Effect]) {
+        for effect in effects {
+            let props: ParticleProps = effect_props(effect, self.time);
+            self.fx.spawn_burst(props);
+        }
+    }
+
     /// Triggers cosmetics from a snapshot (dash trails/bursts, hit shake, baked
     /// effects), then stores it as the world to render.
+    ///
+    /// Snapshots ride an unreliable channel, so one can arrive out of order or
+    /// be replayed. Applying a stale one would snap the world backwards, so
+    /// anything not strictly newer than the last applied tick is dropped.
     fn apply_snapshot(&mut self, snapshot: Snapshot) {
+        if let Some(last) = self.last_tick
+            && snapshot.tick <= last
+        {
+            return;
+        }
+        self.last_tick = Some(snapshot.tick);
+
         for agent in snapshot.agents.iter() {
             let color: (u8, u8, u8) = if agent.rapid_fire {
                 (255, 200, 50)
@@ -159,11 +195,6 @@ impl Client {
                 self.fx.add_shake(12.0);
             }
             self.prev_health.insert(agent.owner, agent.health);
-        }
-
-        for effect in snapshot.effects.iter() {
-            let props: ParticleProps = effect_props(effect, self.time);
-            self.fx.spawn_burst(props);
         }
 
         self.latest = Some(snapshot);
@@ -245,7 +276,9 @@ impl Client {
         }
 
         match postcard::to_stdvec(&input) {
-            Ok(bytes) => ctx.network().send(SERVER_ID, NetworkChannel::ReliableOrdered, &bytes),
+            Ok(bytes) => ctx
+                .network()
+                .send(SERVER_ID, NetworkChannel::UnreliableSequenced, &bytes),
             Err(e) => log::error!("Failed to encode input: {e}"),
         }
     }
@@ -374,21 +407,23 @@ impl Game for Client {
     fn on_fixed_update(&mut self, ctx: &mut dyn GameContext<Action>) {
         let dt: f32 = ctx.fixed_delta() as f32;
         self.local_shoot_cooldown -= dt;
-        self.afterimage_clock += dt;
+        self.afterimage_clock -= dt;
 
         self.receive(ctx);
 
-        if self.afterimage_clock % 0.05 < dt
-            && let Some(snapshot) = self.latest.as_ref()
-        {
-            for agent in snapshot.agents.iter() {
-                if agent.dashing {
-                    let color: (u8, u8, u8) = if agent.rapid_fire {
-                        (255, 200, 50)
-                    } else {
-                        player_color(agent.owner)
-                    };
-                    self.fx.spawn_afterimage(agent.pos.vec(), ENTITY_SIZE, color);
+        if self.afterimage_clock <= 0.0 {
+            self.afterimage_clock = AFTERIMAGE_INTERVAL;
+
+            if let Some(snapshot) = self.latest.as_ref() {
+                for agent in snapshot.agents.iter() {
+                    if agent.dashing {
+                        let color: (u8, u8, u8) = if agent.rapid_fire {
+                            (255, 200, 50)
+                        } else {
+                            player_color(agent.owner)
+                        };
+                        self.fx.spawn_afterimage(agent.pos.vec(), ENTITY_SIZE, color);
+                    }
                 }
             }
         }
@@ -398,23 +433,26 @@ impl Game for Client {
 
     fn on_update(&mut self, ctx: &mut dyn GameContext<Action>) {
         let dt: f32 = ctx.delta_time() as f32;
-        self.time += dt;
+        self.time = (self.time + dt) % 3600.0;
+        self.trail_clock -= dt;
         self.fx.update(dt);
 
-        if self.time % 0.05 < dt
-            && let Some(snapshot) = self.latest.as_ref()
-        {
-            for bullet in snapshot.bullets.iter() {
-                let (r, g, b_c): (u8, u8, u8) = weapon_color(bullet.weapon);
-                self.fx.spawn_burst(ParticleProps {
-                    pos: bullet.pos.vec() + Vec2::splat(bullet.size / 2.0),
-                    color: (r, g, b_c),
-                    count: 1,
-                    speed: 20.0,
-                    seed: self.time + bullet.pos.x,
-                    life: 0.2,
-                    size: bullet.size * 0.8,
-                });
+        if self.trail_clock <= 0.0 {
+            self.trail_clock = TRAIL_INTERVAL;
+
+            if let Some(snapshot) = self.latest.as_ref() {
+                for bullet in snapshot.bullets.iter() {
+                    let (r, g, b_c): (u8, u8, u8) = weapon_color(bullet.weapon);
+                    self.fx.spawn_burst(ParticleProps {
+                        pos: bullet.pos.vec() + Vec2::splat(bullet.size / 2.0),
+                        color: (r, g, b_c),
+                        count: 1,
+                        speed: 20.0,
+                        seed: self.time + bullet.pos.x,
+                        life: 0.2,
+                        size: bullet.size * 0.8,
+                    });
+                }
             }
         }
 

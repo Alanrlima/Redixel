@@ -42,8 +42,11 @@ pub enum Weapon {
     Homing,
 }
 
-/// A client's sampled intent for one tick, sent to the server on the reliable
-/// channel. The server stores the latest and re-applies it every tick.
+/// A client's sampled intent for one tick, sent to the server on the
+/// unreliable-sequenced channel. The server stores the latest and re-applies it
+/// every tick, so a dropped packet costs one tick of staleness — cheaper than
+/// the head-of-line blocking a reliable stream would impose on every input
+/// behind a retransmit.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct PlayerInput {
     pub move_dir: V2,
@@ -100,12 +103,32 @@ pub struct Effect {
 
 /// The full authoritative world state for one tick, broadcast to every client on
 /// the unreliable-sequenced channel.
+///
+/// Continuous state only: every field here is superseded by the next tick, so
+/// losing one snapshot costs nothing but a frame of staleness. One-shot
+/// cosmetics travel separately in an [`EffectBatch`].
+///
+/// `tick` is the server's fixed tick: clients drop any snapshot not strictly
+/// newer than the last one they applied, so a reordered or replayed packet can
+/// never snap the world backwards.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Snapshot {
     pub tick: u64,
     pub agents: Vec<AgentState>,
     pub bullets: Vec<BulletState>,
     pub powerup: Option<PowerupState>,
+}
+
+/// The one-shot cosmetics produced during one tick, broadcast on the **reliable**
+/// channel.
+///
+/// Effects are discrete events, not continuous state: there is no later value
+/// that supersedes them, so a dropped effect is simply never played. That is
+/// exactly the split `NetworkChannel` prescribes — discrete events go
+/// `ReliableOrdered`, superseded state goes `UnreliableSequenced`. Keeping them
+/// out of [`Snapshot`] also shrinks it, so it fragments less often.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EffectBatch {
     pub effects: Vec<Effect>,
 }
 
