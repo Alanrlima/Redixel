@@ -115,7 +115,7 @@ impl NetworkManager for LoopbackNetwork {
         !self.peer_gone
     }
 
-    fn update(&mut self, _dt: f64) {
+    fn update(&mut self) {
         self.queue.reset();
 
         if !self.announced {
@@ -186,8 +186,8 @@ mod tests {
         assert_eq!(client.local_client(), Some(LOOPBACK_CLIENT_ID));
         assert_eq!(server.local_client(), None);
 
-        server.update(0.016);
-        client.update(0.016);
+        server.update();
+        client.update();
 
         let mut s_events: Vec<String> = Vec::new();
         let mut c_events: Vec<String> = Vec::new();
@@ -201,13 +201,13 @@ mod tests {
     #[test]
     fn reliable_message_round_trips_client_to_server() {
         let (mut server, mut client) = LoopbackNetwork::pair();
-        server.update(0.016);
-        client.update(0.016);
+        server.update();
+        client.update();
 
         client.broadcast(NetworkChannel::ReliableOrdered, b"hello");
         client.flush();
 
-        server.update(0.016);
+        server.update();
         let mut events: Vec<String> = Vec::new();
         drain(&mut server, &mut events);
         assert_eq!(events, vec!["msg:1:0:hello"]);
@@ -216,14 +216,14 @@ mod tests {
     #[test]
     fn unreliable_sequenced_delivers_in_order_stream() {
         let (mut server, mut client) = LoopbackNetwork::pair();
-        server.update(0.016);
-        client.update(0.016);
+        server.update();
+        client.update();
 
         server.broadcast(NetworkChannel::UnreliableSequenced, b"a");
         server.broadcast(NetworkChannel::UnreliableSequenced, b"b");
         server.broadcast(NetworkChannel::UnreliableSequenced, b"c");
 
-        client.update(0.016);
+        client.update();
         let mut events: Vec<String> = Vec::new();
         drain(&mut client, &mut events);
         assert_eq!(
@@ -239,11 +239,11 @@ mod tests {
     #[test]
     fn dropping_one_end_disconnects_the_other() {
         let (mut server, mut client) = LoopbackNetwork::pair();
-        server.update(0.016);
-        client.update(0.016);
+        server.update();
+        client.update();
         drop(client);
 
-        server.update(0.016);
+        server.update();
         let mut events: Vec<String> = Vec::new();
         drain(&mut server, &mut events);
         assert_eq!(events, vec!["disc:1"]);

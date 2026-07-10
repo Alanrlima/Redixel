@@ -27,9 +27,18 @@ pub enum CertSource {
     },
 }
 
-/// Declarative networking configuration consumed by [`build`]. `server_name`
-/// (client only) selects TLS mode: `Some` validates against a real domain
-/// cert (online), `None` connects by IP with validation disabled (LAN).
+/// Declarative networking configuration consumed by [`build`].
+///
+/// - `max_clients` (server only): peers admitted simultaneously. Further
+///   sessions are turned away during the handshake, before the game ever sees
+///   them. Clamped to a minimum of 1.
+/// - `protocol_id`: rejects a peer whose id differs, closing the connection
+///   during the handshake. Both sides must agree — bump it per game (and per
+///   wire-format change) so mismatched builds fail loudly instead of exchanging
+///   garbage.
+/// - `server_name` (client only) selects TLS mode: `Some` validates against a
+///   real domain cert (online), `None` connects by IP with validation disabled
+///   (LAN).
 #[derive(Debug, Clone)]
 pub struct NetConfig {
     pub mode: NetMode,
@@ -68,7 +77,7 @@ impl NetConfig {
 /// `tickrate` is the local authoritative rate: a server embeds it in its
 /// welcome frame for clients to adopt; a client ignores its own value entirely
 /// and adopts whatever the server announces instead (see
-/// [`NetworkManager::server_tickrate`](redixel_core::NetworkManager::server_tickrate)).
+/// [`redixel_core::NetworkManager::server_tickrate`]).
 ///
 /// Never fails fatally: a transport that cannot start (e.g. a server whose
 /// socket fails to bind) logs an error and degrades to a [`NoOpNetwork`] so the
