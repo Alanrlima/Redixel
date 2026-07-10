@@ -20,7 +20,7 @@ pub mod prelude {
     pub use redixel_runtime::RuntimeConfig;
 
     #[cfg(feature = "net")]
-    pub use redixel_net::{NetConfig, NetMode};
+    pub use redixel_net::{CertSource, DEFAULT_PROTOCOL_ID, NetConfig, NetMode};
 
     #[cfg(not(target_arch = "wasm32"))]
     pub use redixel_runtime::{HeadlessRuntime, run_headless};
@@ -33,22 +33,20 @@ pub fn build_config() -> RuntimeConfig {
 
     let settings: RwLockReadGuard<EngineSettings> = EngineSettings::global_read();
 
-    RuntimeConfig {
-        target_fps: settings.get_path("window.target_fps", 60.0),
-        tickrate: settings.get_path("engine.tickrate", DEFAULT_TICKRATE),
-        #[cfg(feature = "net")]
-        net: None,
-        window: WindowConfig {
+    RuntimeConfig::windowed(
+        WindowConfig {
             width: settings.get_path("window.width", 1280),
             height: settings.get_path("window.height", 720),
             fullscreen: settings.get_path("window.fullscreen", false),
             title: settings.get_path("app.name", String::from("Redixel")),
         },
-        renderer: RendererConfig {
+        RendererConfig {
             backends: settings.get_path("renderer.backend", RawBackend(0)).into(),
             present_mode: settings.get_path("renderer.present_mode", RawPresentMode(0)).into(),
         },
-    }
+        settings.get_path("window.target_fps", 60.0),
+        settings.get_path("engine.tickrate", DEFAULT_TICKRATE),
+    )
 }
 
 /// Runs `game` as a single-player desktop app, loading [`RuntimeConfig`] from
@@ -61,9 +59,9 @@ pub fn run_desktop<G: Game>(game: G) -> Result<(), RedixelError> {
 /// Like [`run_desktop`] but with an explicit [`RuntimeConfig`] — use this to run
 /// a **windowed client** with networking enabled (set `config.net`).
 ///
-/// Uses [`EventLoopExtRunOnDemand`], which lets the event loop return control to
+/// Uses `EventLoopExtRunOnDemand`, which lets the event loop return control to
 /// the caller and be re-entered — a desktop-only capability not available on
-/// iOS or the web (see [`run_ios_with`] / [`run_wasm_with`]).
+/// iOS or the web (see `run_ios_with` / `run_wasm_with`).
 #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))]
 pub fn run_desktop_with<G: Game>(game: G, config: RuntimeConfig) -> Result<(), RedixelError> {
     use winit::event_loop::run_on_demand::EventLoopExtRunOnDemand;
@@ -99,9 +97,11 @@ pub fn run_android_with<G: Game>(game: G, app: AndroidApp, config: RuntimeConfig
 
     let runtime_ptr: *mut Runtime<G> = Box::into_raw(Box::new(Runtime::new(game, config)));
     let runtime_ref: &'static mut Runtime<G> = unsafe { &mut *runtime_ptr };
-    event_loop.run_app(runtime_ref)?;
+    let run_result: Result<(), winit::error::EventLoopError> = event_loop.run_app(runtime_ref);
 
     let mut owned_runtime: Box<Runtime<G>> = unsafe { Box::from_raw(runtime_ptr) };
+    run_result?;
+
     if let Some(e) = owned_runtime.take_error() {
         return Err(e);
     }
@@ -123,7 +123,7 @@ pub fn run_ios<G: Game + 'static>(game: G) -> Result<(), RedixelError> {
 /// Like [`run_ios`] but with an explicit [`RuntimeConfig`] — use this to run a
 /// **windowed client** with networking enabled (set `config.net`).
 ///
-/// iOS has no [`EventLoopExtRunOnDemand`](winit::event_loop::run_on_demand::EventLoopExtRunOnDemand)
+/// iOS has no `EventLoopExtRunOnDemand`
 /// (desktop-only), so this uses the portable [`EventLoop::run_app`], which
 /// dispatches to UIKit's `run_app_never_return` under the hood: on success this
 /// call never returns to the caller (the OS owns the run loop until the process
@@ -144,18 +144,20 @@ pub fn run_ios_with<G: Game + 'static>(game: G, config: RuntimeConfig) -> Result
 /// `config/config.json`.
 #[cfg(target_arch = "wasm32")]
 pub fn run_wasm<G: Game + 'static>(game: G) -> Result<(), RedixelError> {
+    run_wasm_with(game, build_config())
+}
+
+/// Like [`run_wasm`] but with an explicit [`RuntimeConfig`].
+///
+/// Browser WebTransport is not implemented yet: a `config.net` other than
+/// `Offline` logs an error and degrades to the no-op transport.
+#[cfg(target_arch = "wasm32")]
+pub fn run_wasm_with<G: Game + 'static>(game: G, config: RuntimeConfig) -> Result<(), RedixelError> {
     let event_loop: EventLoop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
 
-    let runtime: Runtime<G> = Runtime::new(game, build_config());
+    let runtime: Runtime<G> = Runtime::new(game, config);
     event_loop.run_app(runtime)?;
 
     Ok(())
-}
-
-/// Like [`run_wasm`] but with an explicit [`RuntimeConfig`] — use this to run a
-/// **windowed client** with networking enabled (set `config.net`).
-#[cfg(target_arch = "wasm32")]
-pub fn run_wasm_with<G: Game + 'static>(_game: G, _config: RuntimeConfig) -> Result<(), RedixelError> {
-    todo!("browser WebTransport client not yet implemented")
 }
