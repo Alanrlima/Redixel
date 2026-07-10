@@ -82,7 +82,7 @@ pub trait GameContext<A: InputAction> {
     /// Requests a clean engine shutdown after the current frame.
     fn exit(&mut self);
 
-    /// Returns `true` if [`exit`] was called this frame.
+    /// Returns `true` if [`exit`](Self::exit) was called this frame.
     fn should_exit(&self) -> bool;
 
     /// Seconds elapsed between the two most recent frames (delta time).

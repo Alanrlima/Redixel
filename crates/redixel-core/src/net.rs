@@ -48,8 +48,11 @@ pub enum NetworkEvent<'a> {
 /// [`GameContext::network`](crate::game::GameContext::network).
 ///
 /// # Hot-path contract
-/// Implementations must not allocate per message in steady state: reuse receive
-/// buffers, and frame outbound packets through a reusable scratch buffer.
+/// [`poll`](Self::poll) hands out payloads borrowed from an internal receive
+/// buffer and never allocates. [`send`](Self::send)/[`broadcast`](Self::broadcast)
+/// copy `payload` once into the transport's send queue, since it crosses a
+/// thread boundary; implementations must not copy it *again* per peer when
+/// broadcasting, nor allocate a fresh scratch buffer to frame each packet.
 ///
 /// # Usage (inside `on_fixed_update`)
 /// ```rust,ignore
@@ -102,29 +105,24 @@ pub trait NetworkManager {
         0.0
     }
 
-    /// Packet-loss fraction in `[0, 1]` (client side). Returns `0.0` on a server,
-    /// an unconnected client, or the no-op transport.
-    fn packet_loss(&self) -> f32 {
-        0.0
-    }
-
     /// The server's authoritative fixed-update tickrate (Hz), once known.
     ///
     /// `None` until a client connection completes its handshake, or when
     /// negotiation doesn't apply (server, offline, no-op, same-process
-    /// loopback — tickrate is already shared there). The runtime's fixed-update
-    /// loop checks this once per tick and adopts it the moment it becomes
-    /// `Some`, so a networked client's simulation rate tracks the server's
-    /// exactly after a brief local-config bootstrap window, never dictated by
-    /// its own config beyond that.
+    /// loopback — tickrate is already shared there). The runtime checks this
+    /// once per frame, *before* feeding elapsed time into the fixed-step
+    /// accumulator, and adopts it the moment it becomes `Some` — so a networked
+    /// client's simulation rate tracks the server's exactly after a brief
+    /// local-config bootstrap window, never dictated by its own config beyond
+    /// that.
     fn server_tickrate(&self) -> Option<f64> {
         None
     }
 
-    /// Advances the transport by `dt` seconds and receives pending packets into
-    /// the internal buffer that [`poll`](Self::poll) drains. The runtime calls
-    /// this once per fixed step, before `on_fixed_update`.
-    fn update(&mut self, dt: f64);
+    /// Receives pending packets into the internal buffer that
+    /// [`poll`](Self::poll) drains. The runtime calls this once per fixed step,
+    /// before `on_fixed_update`.
+    fn update(&mut self);
 
     /// Sends queued outbound packets onto the wire. The runtime calls this once
     /// per fixed step, after `on_fixed_update`. Transports that deliver eagerly
@@ -168,7 +166,7 @@ impl NetworkManager for NoOpNetwork {
     }
 
     #[inline]
-    fn update(&mut self, _dt: f64) {}
+    fn update(&mut self) {}
 
     #[inline]
     fn flush(&mut self) {}
@@ -182,6 +180,11 @@ impl NetworkManager for NoOpNetwork {
 /// currently owns it, so stale reads (a wrapped-over sequence) return `None`
 /// without a separate occupancy scan. Insertion and lookup are O(1) and never
 /// allocate after construction.
+///
+/// This is the storage primitive only. Reconciliation on top of it also needs
+/// the client to reproduce the server's simulation step for step — the engine
+/// does not guarantee that today, and no shipped example depends on it. Treat
+/// the pattern below as the shape of the solution, not a turnkey one.
 ///
 /// # Prediction / reconciliation pattern
 /// Tag everything with the fixed tick from
@@ -344,7 +347,7 @@ mod tests {
         assert_eq!(net.local_client(), None);
         net.send(1, NetworkChannel::ReliableOrdered, &[1, 2, 3]);
         net.broadcast(NetworkChannel::UnreliableSequenced, &[4, 5]);
-        net.update(0.016);
+        net.update();
     }
 
     #[test]
