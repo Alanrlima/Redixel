@@ -44,12 +44,31 @@ pub struct RuntimeConfig {
 }
 
 impl RuntimeConfig {
+    /// A windowed configuration with networking off. Enable it with
+    /// `with_net`.
+    ///
+    /// Always construct through this (or [`headless`](Self::headless)) from
+    /// another crate, never with a struct literal: the `net` field only exists
+    /// when *this* crate's `net` feature is on, and that feature can be enabled
+    /// by any crate in the dependency graph. A caller that spells out every
+    /// field compiles only when its own `net` feature happens to agree.
+    pub fn windowed(window: WindowConfig, renderer: RendererConfig, target_fps: f64, tickrate: f64) -> Self {
+        Self {
+            window,
+            renderer,
+            target_fps,
+            tickrate,
+            #[cfg(feature = "net")]
+            net: None,
+        }
+    }
+
     /// A configuration for a **headless server**: no window, no GPU, just a
     /// fixed-update tick driving simulation. The window/renderer fields are
     /// placeholders never touched by [`HeadlessRuntime`]. `tickrate` follows
     /// the same `config.json` (`engine.tickrate`) fallback as the windowed
     /// path, defaulting to [`DEFAULT_TICKRATE`] when the file or key is
-    /// absent. Enable networking with [`with_net`](Self::with_net).
+    /// absent. Enable networking with `with_net`.
     pub fn headless() -> Self {
         EngineSettings::load_config_json();
 
@@ -482,22 +501,20 @@ mod tests {
     }
 
     fn mock_config() -> RuntimeConfig {
-        RuntimeConfig {
-            target_fps: 60.0,
-            tickrate: 60.0,
-            #[cfg(feature = "net")]
-            net: None,
-            window: WindowConfig {
+        RuntimeConfig::windowed(
+            WindowConfig {
                 width: 800,
                 height: 600,
                 fullscreen: false,
                 title: String::from("TEST_TITLE"),
             },
-            renderer: RendererConfig {
+            RendererConfig {
                 backends: wgpu::Backends::all(),
                 present_mode: wgpu::PresentMode::AutoVsync,
             },
-        }
+            60.0,
+            60.0,
+        )
     }
 
     #[test]

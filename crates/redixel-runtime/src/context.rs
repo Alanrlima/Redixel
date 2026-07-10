@@ -15,7 +15,7 @@ pub enum DrawCommand {
     Triangle { p1: Vec2, p2: Vec2, p3: Vec2, color: Color },
 }
 
-/// Concrete engine context passed to [`Game`] callbacks each frame.
+/// Concrete engine context passed to [`Game`](redixel_core::Game) callbacks each frame.
 ///
 /// Implements [`GameContext`] and is passed as `&mut dyn GameContext` to keep
 /// `redixel-core` free of any dependency on `redixel-runtime`.

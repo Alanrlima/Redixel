@@ -37,19 +37,25 @@ impl<G: Game> SimulationCore<G> {
     }
 
     /// Feeds elapsed real time into the fixed-step accumulator and runs every
-    /// owed step: advance the transport, adopt the server's authoritative
-    /// tickrate the moment a connected client learns it (a no-op everywhere
-    /// else — see [`NetworkManager::server_tickrate`](redixel_core::net::NetworkManager::server_tickrate)),
-    /// stamp the fixed timing, invoke `on_fixed_update`, then flush the
-    /// transport. Stops early on a recorded error or an exit request.
+    /// owed step: advance the transport, stamp the fixed timing, invoke
+    /// `on_fixed_update`, then flush the transport. Stops early on a recorded
+    /// error or an exit request.
+    ///
+    /// The server's authoritative tickrate is adopted **before** the accumulator
+    /// is fed (a no-op everywhere but a connected client — see
+    /// [`NetworkManager::server_tickrate`](redixel_core::net::NetworkManager::server_tickrate)).
+    /// Adopting it mid-loop would shrink the step *after* `accumulate` already
+    /// clamped against the old, larger one, letting a single frame run far more
+    /// than `max_substeps` steps — exactly the catch-up burst the clamp exists
+    /// to prevent.
     pub(crate) fn run_fixed_updates(&mut self, frame_delta: f64) -> StepFlow {
+        if let Some(rate) = self.context.network.server_tickrate() {
+            self.time.set_tickrate(rate);
+        }
+
         self.time.accumulate(frame_delta);
         while self.time.next_fixed_step() {
-            self.context.network.update(self.time.fixed_delta());
-
-            if let Some(rate) = self.context.network.server_tickrate() {
-                self.time.set_tickrate(rate);
-            }
+            self.context.network.update();
 
             let fixed_delta: f64 = self.time.fixed_delta();
             self.context.set_fixed(fixed_delta, self.time.fixed_tick());

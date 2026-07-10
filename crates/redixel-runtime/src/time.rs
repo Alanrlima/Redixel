@@ -26,7 +26,7 @@ const DEFAULT_MAX_SUBSTEPS: u32 = 8;
 ///
 /// Exposes two different FPS readings:
 /// - [`fps`](Self::fps): instantaneous, recalculated every single frame.
-/// - [`display_fps`](Self::display_fps): rolling average over the last [`FPS_WINDOW`] frames.
+/// - [`display_fps`](Self::display_fps): rolling average over the last `FPS_WINDOW` (60) frames.
 ///
 /// # Usage
 /// ```ignore
@@ -76,11 +76,15 @@ impl TimeManager {
     }
 
     /// Sets the fixed-update tickrate in Hz (e.g. `60.0`). Non-positive values
-    /// are ignored, keeping the previous step. Resets nothing else — safe to
-    /// call before the loop starts.
+    /// are ignored, keeping the previous step.
+    ///
+    /// Shrinking the step (raising the tickrate) re-clamps the accumulator, so
+    /// time banked against a coarser step can never cash out as a catch-up burst
+    /// longer than `max_substeps`.
     pub fn set_tickrate(&mut self, hz: f64) {
         if hz > 0.0 {
             self.fixed_step = 1.0 / hz;
+            self.clamp_accumulator();
         } else {
             log::warn!("Ignoring non-positive tickrate {hz}; keeping {} Hz.", 1.0 / self.fixed_step);
         }
@@ -90,6 +94,7 @@ impl TimeManager {
     /// Must be at least 1.
     pub fn set_max_substeps(&mut self, max: u32) {
         self.max_substeps = max.max(1);
+        self.clamp_accumulator();
     }
 
     /// Feeds elapsed real time into the fixed-step accumulator.
@@ -99,7 +104,11 @@ impl TimeManager {
     /// an unbounded catch-up burst.
     pub fn accumulate(&mut self, frame_delta: f64) {
         self.accumulator += frame_delta;
+        self.clamp_accumulator();
+    }
 
+    /// Caps the accumulator at `max_substeps` worth of the *current* fixed step.
+    fn clamp_accumulator(&mut self) {
         let ceiling: f64 = self.fixed_step * self.max_substeps as f64;
         if self.accumulator > ceiling {
             self.accumulator = ceiling;
@@ -186,7 +195,7 @@ impl TimeManager {
         self.fps
     }
 
-    /// Returns a **smoothed** FPS reading averaged over the last [`FPS_WINDOW`] frames.
+    /// Returns a **smoothed** FPS reading averaged over the last `FPS_WINDOW` (60) frames.
     pub fn display_fps(&self) -> f64 {
         if self.frame_times_filled == 0 {
             return 0.0;
@@ -407,6 +416,38 @@ mod tests {
         }
 
         assert_eq!(steps, 8, "accumulator must clamp to max_substeps");
+    }
+
+    #[test]
+    fn raising_tickrate_reclamps_banked_time() {
+        let mut tm: TimeManager = TimeManager::new();
+        tm.set_tickrate(20.0);
+        tm.set_max_substeps(8);
+
+        tm.accumulate(10.0);
+        tm.set_tickrate(60.0);
+
+        let mut steps: u32 = 0;
+        while tm.next_fixed_step() {
+            steps += 1;
+        }
+
+        assert_eq!(steps, 8, "a tickrate change must not bypass the max_substeps clamp");
+    }
+
+    #[test]
+    fn lowering_max_substeps_reclamps_banked_time() {
+        let mut tm: TimeManager = TimeManager::new();
+        tm.set_tickrate(60.0);
+        tm.accumulate(10.0);
+        tm.set_max_substeps(2);
+
+        let mut steps: u32 = 0;
+        while tm.next_fixed_step() {
+            steps += 1;
+        }
+
+        assert_eq!(steps, 2);
     }
 
     #[test]
