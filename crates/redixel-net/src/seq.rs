@@ -87,7 +87,6 @@ pub struct Reassembler {
     parts: Vec<Option<Vec<u8>>>,
     remaining: usize,
     received_len: usize,
-    complete: bool,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -96,10 +95,10 @@ impl Reassembler {
         Self::default()
     }
 
-    /// Drops the in-flight sequence and releases its buffers, marking it done so
-    /// its remaining fragments are ignored instead of restarting it.
+    /// Drops the in-flight sequence and releases its buffers, marking it done
+    /// (`remaining == 0`) so its remaining fragments are ignored instead of
+    /// restarting it.
     fn abandon(&mut self) {
-        self.complete = true;
         self.remaining = 0;
         self.received_len = 0;
         self.parts.clear();
@@ -126,12 +125,11 @@ impl Reassembler {
 
         if fresh {
             self.seq = Some(seq);
-            self.complete = false;
             self.remaining = count as usize;
             self.received_len = 0;
             self.parts.clear();
             self.parts.resize_with(count as usize, || None);
-        } else if self.complete || self.parts.len() != count as usize {
+        } else if self.remaining == 0 || self.parts.len() != count as usize {
             return None;
         }
 
@@ -152,8 +150,6 @@ impl Reassembler {
         if self.remaining > 0 {
             return None;
         }
-
-        self.complete = true;
 
         let total: usize = self
             .parts

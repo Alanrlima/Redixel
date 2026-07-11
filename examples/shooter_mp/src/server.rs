@@ -5,7 +5,7 @@ use redixel::prelude::{ClientId, Game, GameContext, NetworkChannel, NetworkEvent
 use crate::proto::{
     ARENA_H, ARENA_W, AgentState, BASE_COOLDOWN, BULLET_SIZE, BULLET_SPEED, BulletState, ENTITY_SIZE, Effect,
     EffectBatch, EffectKind, PLAYER_SPEED, POWERUP_DURATION, POWERUP_SIZE, PlayerInput, PowerupState,
-    RAPID_FIRE_COOLDOWN, Snapshot, V2, Weapon, overlaps, rotate_vec, weapon_color,
+    RAPID_FIRE_COOLDOWN, Snapshot, V2, Weapon, overlaps, recoil_for, rotate_vec, send_encoded, weapon_color,
 };
 
 /// Seconds between a powerup being picked up and the next one appearing.
@@ -153,7 +153,7 @@ impl Server {
                     destroyed: false,
                     size: BULLET_SIZE,
                 });
-                100.0
+                recoil_for(Weapon::Pistol)
             }
             Weapon::Shotgun => {
                 let angles: [f32; 5] = [-0.3, -0.15, 0.0, 0.15, 0.3];
@@ -168,7 +168,7 @@ impl Server {
                         size: BULLET_SIZE,
                     });
                 }
-                400.0
+                recoil_for(Weapon::Shotgun)
             }
             Weapon::Flamethrower => {
                 let offsets: [f32; 6] = [-0.4, -0.2, -0.05, 0.05, 0.2, 0.4];
@@ -189,7 +189,7 @@ impl Server {
                     });
                     i += 1;
                 }
-                25.0
+                recoil_for(Weapon::Flamethrower)
             }
             Weapon::Homing => {
                 bullets.push(ServerBullet {
@@ -201,7 +201,7 @@ impl Server {
                     destroyed: false,
                     size: BULLET_SIZE,
                 });
-                150.0
+                recoil_for(Weapon::Homing)
             }
         }
     }
@@ -212,13 +212,14 @@ impl Server {
             match event {
                 NetworkEvent::Connected(id) => self.add_player(id),
                 NetworkEvent::Disconnected(id) => self.remove_player(id),
-                NetworkEvent::Message(id, _channel, payload) => {
+                NetworkEvent::Message(id, NetworkChannel::UnreliableSequenced, payload) => {
                     if let Ok(input) = postcard::from_bytes::<PlayerInput>(payload)
                         && let Some(agent) = self.agents.iter_mut().find(|a: &&mut ServerAgent| a.owner == id)
                     {
                         agent.input = input;
                     }
                 }
+                NetworkEvent::Message(.., NetworkChannel::ReliableOrdered, _) => {}
             }
         }
     }
@@ -534,10 +535,7 @@ impl Server {
     /// effect would never play again.
     fn broadcast_state(&mut self, ctx: &mut dyn GameContext<()>) {
         let snapshot: Snapshot = self.build_snapshot(ctx.fixed_tick());
-        match postcard::to_stdvec(&snapshot) {
-            Ok(bytes) => ctx.network().broadcast(NetworkChannel::UnreliableSequenced, &bytes),
-            Err(e) => log::error!("Failed to encode snapshot: {e}"),
-        }
+        send_encoded(ctx.network(), NetworkChannel::UnreliableSequenced, None, &snapshot, "snapshot");
 
         if self.effects.is_empty() {
             return;
@@ -546,10 +544,7 @@ impl Server {
         let batch: EffectBatch = EffectBatch {
             effects: take(&mut self.effects),
         };
-        match postcard::to_stdvec(&batch) {
-            Ok(bytes) => ctx.network().broadcast(NetworkChannel::ReliableOrdered, &bytes),
-            Err(e) => log::error!("Failed to encode effects: {e}"),
-        }
+        send_encoded(ctx.network(), NetworkChannel::ReliableOrdered, None, &batch, "effects");
     }
 }
 

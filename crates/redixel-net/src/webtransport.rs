@@ -68,16 +68,10 @@ const SERVER_WORKER_THREADS: usize = 2;
 /// one connection; extra workers would only contend with the render thread.
 const CLIENT_WORKER_THREADS: usize = 1;
 
-/// An inbound bridge event produced by an async task for the sync manager.
-enum Incoming {
-    Connected(ClientId),
-    Disconnected(ClientId),
-    Message {
-        client: ClientId,
-        channel: NetworkChannel,
-        payload: Vec<u8>,
-    },
-}
+/// One inbound bridge event carried from an async task to the sync manager: the
+/// backend stores payloads as owned `Vec<u8>`, so [`Inbound`] is specialized once
+/// here and reused for every channel end.
+type InboundEvent = Inbound<Vec<u8>>;
 
 /// An outbound bridge command produced by the sync manager for the dispatcher.
 ///
@@ -129,7 +123,7 @@ fn spawn_connection_tasks(
     recv: RecvStream,
     reliable_rx: UnboundedReceiver<Bytes>,
     msg_client: ClientId,
-    inbound_tx: UnboundedSender<Incoming>,
+    inbound_tx: UnboundedSender<InboundEvent>,
 ) {
     tokio::spawn(reliable_writer(send, reliable_rx));
     tokio::spawn(reliable_reader(recv, msg_client, inbound_tx.clone()));
@@ -155,11 +149,11 @@ async fn reliable_writer(mut send: SendStream, mut rx: UnboundedReceiver<Bytes>)
     send.finish().await.ok();
 }
 
-/// Forwards inbound reliable frames as [`Incoming::Message`]s.
-async fn reliable_reader(mut recv: RecvStream, client: ClientId, tx: UnboundedSender<Incoming>) {
+/// Forwards inbound reliable frames as [`Inbound::Message`]s.
+async fn reliable_reader(mut recv: RecvStream, client: ClientId, tx: UnboundedSender<InboundEvent>) {
     while let Some(payload) = read_frame(&mut recv).await {
         let sent: bool = tx
-            .send(Incoming::Message {
+            .send(Inbound::Message {
                 client,
                 channel: NetworkChannel::ReliableOrdered,
                 payload,
@@ -173,8 +167,8 @@ async fn reliable_reader(mut recv: RecvStream, client: ClientId, tx: UnboundedSe
 }
 
 /// Reassembles inbound datagram fragments (newest-wins) into whole messages and
-/// forwards them as [`Incoming::Message`]s.
-async fn datagram_reader(conn: Arc<Connection>, client: ClientId, tx: UnboundedSender<Incoming>) {
+/// forwards them as [`Inbound::Message`]s.
+async fn datagram_reader(conn: Arc<Connection>, client: ClientId, tx: UnboundedSender<InboundEvent>) {
     let mut reassembler: seq::Reassembler = seq::Reassembler::new();
 
     loop {
@@ -193,7 +187,7 @@ async fn datagram_reader(conn: Arc<Connection>, client: ClientId, tx: UnboundedS
         };
 
         let sent: bool = tx
-            .send(Incoming::Message {
+            .send(Inbound::Message {
                 client,
                 channel: NetworkChannel::UnreliableSequenced,
                 payload,
@@ -278,6 +272,13 @@ async fn make_identity(cert: &CertSource) -> io::Result<Identity> {
 }
 
 /// Server-internal control: connection lifecycle events for the dispatcher's peer map.
+///
+/// Both `Connected` and `Disconnected` are announced to the game from the arms
+/// handling these variants, not from the connection tasks directly, so the two
+/// lifecycle events share one channel and one ordering: a peer's `Ready` is
+/// always sent before its `Closed` (the watcher that could send `Closed` is
+/// spawned only after the `Ready`), so the game sees `Connected` before
+/// `Disconnected`, and never a `Disconnected` for a peer that failed handshake.
 enum Ctrl {
     Ready {
         client: ClientId,
@@ -336,7 +337,7 @@ async fn run_server(
     protocol_id: u64,
     max_clients: usize,
     handshake_timeout: Duration,
-    inbound_tx: UnboundedSender<Incoming>,
+    inbound_tx: UnboundedSender<InboundEvent>,
     mut outbound_rx: UnboundedReceiver<Outgoing>,
 ) {
     let mut conns: HashMap<ClientId, ConnHandle> = HashMap::new();
@@ -373,10 +374,15 @@ async fn run_server(
             Some(ctrl) = ctrl_rx.recv() => match ctrl {
                 Ctrl::Ready { client, conn, reliable_tx } => {
                     conns.insert(client, ConnHandle { conn, reliable_tx, send_seq: 0 });
+                    inbound_tx.send(Inbound::Connected(client)).ok();
                 }
                 Ctrl::Closed { client } => {
-                    conns.remove(&client);
+                    let was_connected: bool = conns.remove(&client).is_some();
                     active = active.saturating_sub(1);
+
+                    if was_connected {
+                        inbound_tx.send(Inbound::Disconnected(client)).ok();
+                    }
                 }
             },
             Some(out) = outbound_rx.recv() => route_outbound(&mut conns, out, &mut scratch),
@@ -477,7 +483,7 @@ async fn handshake_server(
     tickrate: f64,
     protocol_id: u64,
     handshake_timeout: Duration,
-    inbound_tx: UnboundedSender<Incoming>,
+    inbound_tx: UnboundedSender<InboundEvent>,
     ctrl_tx: UnboundedSender<Ctrl>,
 ) {
     let established: Option<(Arc<Connection>, SendStream, RecvStream)> =
@@ -495,7 +501,6 @@ async fn handshake_server(
     };
 
     let (reliable_tx, reliable_rx): (UnboundedSender<Bytes>, UnboundedReceiver<Bytes>) = unbounded_channel();
-    inbound_tx.send(Incoming::Connected(id)).ok();
     ctrl_tx
         .send(Ctrl::Ready {
             client: id,
@@ -508,7 +513,6 @@ async fn handshake_server(
 
     tokio::spawn(async move {
         conn.closed().await;
-        inbound_tx.send(Incoming::Disconnected(id)).ok();
         ctrl_tx.send(Ctrl::Closed { client: id }).ok();
     });
 }
@@ -519,7 +523,7 @@ async fn handshake_server(
 pub struct WebTransportServer {
     _runtime: Runtime,
     local_addr: SocketAddr,
-    inbound_rx: UnboundedReceiver<Incoming>,
+    inbound_rx: UnboundedReceiver<InboundEvent>,
     outbound_tx: UnboundedSender<Outgoing>,
     queue: InboundQueue<Vec<u8>>,
 }
@@ -557,7 +561,8 @@ impl WebTransportServer {
             .worker_threads(SERVER_WORKER_THREADS)
             .enable_all()
             .build()?;
-        let (inbound_tx, inbound_rx): (UnboundedSender<Incoming>, UnboundedReceiver<Incoming>) = unbounded_channel();
+        let (inbound_tx, inbound_rx): (UnboundedSender<InboundEvent>, UnboundedReceiver<InboundEvent>) =
+            unbounded_channel();
         let (outbound_tx, outbound_rx): (UnboundedSender<Outgoing>, UnboundedReceiver<Outgoing>) = unbounded_channel();
 
         let cert: CertSource = cert.clone();
@@ -636,19 +641,7 @@ impl NetworkManager for WebTransportServer {
     fn update(&mut self) {
         self.queue.reset();
         while let Ok(msg) = self.inbound_rx.try_recv() {
-            match msg {
-                Incoming::Connected(id) => self.queue.push(Inbound::Connected(id)),
-                Incoming::Disconnected(id) => self.queue.push(Inbound::Disconnected(id)),
-                Incoming::Message {
-                    client,
-                    channel,
-                    payload,
-                } => self.queue.push(Inbound::Message {
-                    client,
-                    channel,
-                    payload,
-                }),
-            }
+            self.queue.push(msg);
         }
     }
 
@@ -661,7 +654,7 @@ async fn run_client(
     endpoint: Endpoint<endpoint_side::Client>,
     url: String,
     protocol_id: u64,
-    inbound_tx: UnboundedSender<Incoming>,
+    inbound_tx: UnboundedSender<InboundEvent>,
     mut outbound_rx: UnboundedReceiver<Outgoing>,
     rtt: Arc<AtomicU64>,
     server_tickrate: Arc<AtomicU64>,
@@ -725,7 +718,7 @@ async fn run_client(
     }
 
     server_tickrate.store(tickrate.to_bits(), Ordering::Relaxed);
-    inbound_tx.send(Incoming::Connected(id)).ok();
+    inbound_tx.send(Inbound::Connected(id)).ok();
 
     let (reliable_tx, reliable_rx): (UnboundedSender<Bytes>, UnboundedReceiver<Bytes>) = unbounded_channel();
     spawn_connection_tasks(conn.clone(), send, recv, reliable_rx, SERVER_ID, inbound_tx.clone());
@@ -733,7 +726,7 @@ async fn run_client(
     let watch_conn: Arc<Connection> = conn.clone();
     tokio::spawn(async move {
         watch_conn.closed().await;
-        inbound_tx.send(Incoming::Disconnected(id)).ok();
+        inbound_tx.send(Inbound::Disconnected(id)).ok();
     });
 
     let rtt_conn: Arc<Connection> = conn.clone();
@@ -768,7 +761,7 @@ async fn run_client(
 /// Reconnection is the game's call — construct a fresh client.
 pub struct WebTransportClient {
     _runtime: Runtime,
-    inbound_rx: UnboundedReceiver<Incoming>,
+    inbound_rx: UnboundedReceiver<InboundEvent>,
     outbound_tx: UnboundedSender<Outgoing>,
     queue: InboundQueue<Vec<u8>>,
     id: Option<ClientId>,
@@ -789,7 +782,8 @@ impl WebTransportClient {
             .worker_threads(CLIENT_WORKER_THREADS)
             .enable_all()
             .build()?;
-        let (inbound_tx, inbound_rx): (UnboundedSender<Incoming>, UnboundedReceiver<Incoming>) = unbounded_channel();
+        let (inbound_tx, inbound_rx): (UnboundedSender<InboundEvent>, UnboundedReceiver<InboundEvent>) =
+            unbounded_channel();
         let (outbound_tx, outbound_rx): (UnboundedSender<Outgoing>, UnboundedReceiver<Outgoing>) = unbounded_channel();
         let rtt: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
         let server_tickrate: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
@@ -878,26 +872,16 @@ impl NetworkManager for WebTransportClient {
     fn update(&mut self) {
         self.queue.reset();
         while let Ok(msg) = self.inbound_rx.try_recv() {
-            match msg {
-                Incoming::Connected(id) => {
-                    self.id = Some(id);
+            match &msg {
+                Inbound::Connected(id) => {
+                    self.id = Some(*id);
                     self.connected = true;
-                    self.queue.push(Inbound::Connected(id));
                 }
-                Incoming::Disconnected(id) => {
-                    self.connected = false;
-                    self.queue.push(Inbound::Disconnected(id));
-                }
-                Incoming::Message {
-                    client,
-                    channel,
-                    payload,
-                } => self.queue.push(Inbound::Message {
-                    client,
-                    channel,
-                    payload,
-                }),
+                Inbound::Disconnected(..) => self.connected = false,
+                Inbound::Message { .. } => {}
             }
+
+            self.queue.push(msg);
         }
     }
 

@@ -33,7 +33,7 @@ const DEFAULT_MAX_SUBSTEPS: u32 = 8;
 /// time.begin_frame();
 /// // ... render ...
 /// time.end_frame();
-/// time.every_seconds(1.0, |fps| window.set_title_fps(fps));
+/// time.every_seconds(1.0, |fps| window.set_title_stats(fps, rtt_ms));
 /// ```
 #[derive(Debug)]
 pub struct TimeManager {

@@ -122,7 +122,6 @@ impl RuntimeConfig {
 pub struct HeadlessRuntime<G: Game> {
     sim: SimulationCore<G>,
     tickrate: f64,
-    tick_dur: Duration,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -140,12 +139,10 @@ impl<G: Game> HeadlessRuntime<G> {
         time.set_tickrate(tickrate);
 
         let context: Context<G::Action> = Context::with_network(config.build_network());
-        let tick_dur: Duration = Duration::from_secs_f64(1.0 / tickrate);
 
         Self {
             sim: SimulationCore::new(time, context, game),
             tickrate,
-            tick_dur,
         }
     }
 
@@ -176,9 +173,10 @@ impl<G: Game> HeadlessRuntime<G> {
 
             self.sim.context.reset_frame();
 
+            let tick_dur: Duration = Duration::from_secs_f64(self.sim.time.fixed_delta());
             let work: Duration = Instant::now().duration_since(now);
-            if work < self.tick_dur {
-                sleep(self.tick_dur - work);
+            if work < tick_dur {
+                sleep(tick_dur - work);
             }
         }
     }
@@ -395,10 +393,11 @@ impl<G: Game> Runtime<G> {
 
         state.sim.context.reset_frame();
         state.sim.time.end_frame();
+
         state
             .sim
             .time
-            .every_seconds(1.0, |fps: f64| state.window.set_title_fps(fps));
+            .every_seconds(1.0, |fps: f64| state.window.set_title_stats(fps, state.sim.context.rtt_ms()));
 
         state.window.request_redraw();
     }

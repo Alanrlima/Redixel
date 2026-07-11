@@ -61,7 +61,7 @@ pub enum NetworkEvent<'a> {
 ///     match event {
 ///         NetworkEvent::Connected(id) => log::info!("Player {id} joined!"),
 ///         NetworkEvent::Disconnected(id) => self.despawn_player(id),
-///         NetworkEvent::Message(id, _channel, payload) => {
+///         NetworkEvent::Message(id, .., payload) => {
 ///             if let Ok(input) = postcard::from_bytes::<PlayerInput>(payload) {
 ///                 self.apply_input(id, input);
 ///             }
