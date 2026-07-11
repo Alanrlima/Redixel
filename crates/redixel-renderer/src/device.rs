@@ -104,7 +104,7 @@ impl GpuDevice {
             unsafe {
                 instance
                     .create_surface_unsafe(SurfaceTargetUnsafe::RawHandle {
-                        raw_display_handle: window.display_handle()?.as_raw(),
+                        raw_display_handle: Some(window.display_handle()?.as_raw()),
                         raw_window_handle: window.window_handle_any_thread()?.as_raw(),
                     })
                     .map_err(RedixelError::from)
