@@ -1,4 +1,4 @@
-use redixel::prelude::{ClientId, Vec2};
+use redixel::prelude::{ClientId, NetworkChannel, NetworkManager, Vec2};
 use serde::{Deserialize, Serialize};
 
 pub const ARENA_W: f32 = 1280.0;
@@ -151,6 +151,37 @@ pub fn weapon_color(weapon: Weapon) -> (u8, u8, u8) {
         Weapon::Shotgun => (255, 165, 0),
         Weapon::Flamethrower => (255, 70, 0),
         Weapon::Homing => (50, 255, 255),
+    }
+}
+
+/// The shoot recoil magnitude for `weapon`, shared by the server (movement
+/// impulse) and the client (screen-shake) so rebalancing a weapon can't silently
+/// desync the two.
+pub fn recoil_for(weapon: Weapon) -> f32 {
+    match weapon {
+        Weapon::Pistol => 100.0,
+        Weapon::Shotgun => 400.0,
+        Weapon::Flamethrower => 25.0,
+        Weapon::Homing => 150.0,
+    }
+}
+
+/// Encodes `value` and sends it on `channel` — to `target` if given, or broadcast
+/// to everyone otherwise. Logs and drops the message on encode failure (never
+/// panics on a malformed payload).
+pub fn send_encoded<T: Serialize>(
+    net: &mut dyn NetworkManager,
+    channel: NetworkChannel,
+    target: Option<ClientId>,
+    value: &T,
+    what: &str,
+) {
+    match postcard::to_stdvec(value) {
+        Ok(bytes) => match target {
+            Some(id) => net.send(id, channel, &bytes),
+            None => net.broadcast(channel, &bytes),
+        },
+        Err(e) => log::error!("Failed to encode {what}: {e}"),
     }
 }
 

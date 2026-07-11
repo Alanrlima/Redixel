@@ -8,7 +8,7 @@ use crate::{
     effects::{Effects, ParticleProps},
     proto::{
         ARENA_H, ARENA_W, AgentState, BASE_COOLDOWN, ENTITY_SIZE, Effect, EffectBatch, EffectKind, POWERUP_SIZE,
-        PlayerInput, RAPID_FIRE_COOLDOWN, Snapshot, V2, Weapon, player_color, weapon_color,
+        PlayerInput, RAPID_FIRE_COOLDOWN, Snapshot, V2, player_color, recoil_for, send_encoded, weapon_color,
     },
 };
 
@@ -102,16 +102,6 @@ impl Client {
             .copied()
     }
 
-    /// The shoot recoil magnitude for `weapon`, matching the server's impulse scale.
-    fn recoil_for(weapon: Weapon) -> f32 {
-        match weapon {
-            Weapon::Pistol => 100.0,
-            Weapon::Shotgun => 400.0,
-            Weapon::Flamethrower => 25.0,
-            Weapon::Homing => 150.0,
-        }
-    }
-
     /// Drains inbound events, learning the local id and dispatching each message
     /// by the channel it arrived on: continuous world state unreliably, one-shot
     /// cosmetics reliably.
@@ -129,12 +119,12 @@ impl Client {
                 NetworkEvent::Disconnected(..) => {
                     log::warn!("Disconnected from server.");
                 }
-                NetworkEvent::Message(_from, NetworkChannel::UnreliableSequenced, payload) => {
+                NetworkEvent::Message(.., NetworkChannel::UnreliableSequenced, payload) => {
                     if let Ok(snapshot) = postcard::from_bytes::<Snapshot>(payload) {
                         self.apply_snapshot(snapshot);
                     }
                 }
-                NetworkEvent::Message(_from, NetworkChannel::ReliableOrdered, payload) => {
+                NetworkEvent::Message(.., NetworkChannel::ReliableOrdered, payload) => {
                     if let Ok(batch) = postcard::from_bytes::<EffectBatch>(payload) {
                         self.play_effects(&batch.effects);
                     }
@@ -272,15 +262,16 @@ impl Client {
                 BASE_COOLDOWN
             };
             self.local_shoot_cooldown = cooldown;
-            self.fx.add_shake(Self::recoil_for(agent.weapon) * 0.015);
+            self.fx.add_shake(recoil_for(agent.weapon) * 0.015);
         }
 
-        match postcard::to_stdvec(&input) {
-            Ok(bytes) => ctx
-                .network()
-                .send(SERVER_ID, NetworkChannel::UnreliableSequenced, &bytes),
-            Err(e) => log::error!("Failed to encode input: {e}"),
-        }
+        send_encoded(
+            ctx.network(),
+            NetworkChannel::UnreliableSequenced,
+            Some(SERVER_ID),
+            &input,
+            "input",
+        );
     }
 
     /// Draws the arena grid in arena space through `to_screen`, with a fractional
