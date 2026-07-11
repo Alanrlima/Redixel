@@ -38,6 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Updated `README.md`: all example commands now use `--manifest-path` per the workspace restructuring above; added a **Multiplayer** section documenting the authoritative-server/client workflow and required firewall port; added a Wayland/XWayland performance note; added a **Running on iOS** section.
 - `deploy-frontend.yml`: switched WASM example discovery from `cargo metadata` (which no longer sees examples now that they've left the root workspace) to a direct `grep` over `examples/*/Cargo.toml`.
 - `Cargo.lock` is no longer tracked at the repository root — `crates/*` is a pure-library workspace, where Cargo's own guidance is to omit the lockfile since downstream consumers resolve their own. Each `examples/*` package **does** commit its own `Cargo.lock`, since those are applications (native/WASM/APK build artifacts distributed to end users), where pinned, reproducible dependency versions matter; `.gitignore` updated accordingly.
+- **Graphics Backend Upgrade:** Bumped `wgpu` from v27 to v30. The render loop has been migrated to the new presentation model (`queue.present()`), and the native `CurrentSurfaceTexture` states are now cleanly abstracted into engine-agnostic `RedixelError` signals (`SurfaceIgnored`, `SurfaceNeedsReconfiguration`), fully decoupling the runtime from wgpu's internal surface management.
 
 ## [0.2.0]
 
