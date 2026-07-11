@@ -98,6 +98,12 @@ impl<A: InputAction> Context<A> {
         self.should_exit = false;
         self.commands.clear();
     }
+
+    /// Round-trip time to the server in milliseconds, once known — `None`
+    /// when offline, unconnected, or acting as the server itself.
+    pub(crate) fn rtt_ms(&self) -> Option<f64> {
+        (!self.network.is_server() && self.network.is_connected()).then(|| self.network.rtt() as f64 * 1000.0)
+    }
 }
 
 impl<A: InputAction> Default for Context<A> {

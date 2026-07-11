@@ -395,10 +395,11 @@ impl<G: Game> Runtime<G> {
 
         state.sim.context.reset_frame();
         state.sim.time.end_frame();
+
         state
             .sim
             .time
-            .every_seconds(1.0, |fps: f64| state.window.set_title_fps(fps));
+            .every_seconds(1.0, |fps: f64| state.window.set_title_stats(fps, state.sim.context.rtt_ms()));
 
         state.window.request_redraw();
     }
