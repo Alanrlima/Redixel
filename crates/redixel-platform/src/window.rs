@@ -54,11 +54,15 @@ impl WindowManager {
         self.window.request_redraw();
     }
 
-    /// Updates the title bar with the current FPS. No-op on WASM.
+    /// Updates the title bar with the current FPS, and the network RTT in
+    /// milliseconds when `rtt_ms` is `Some` (a connected client). No-op on WASM.
     #[allow(unused_variables)]
-    pub fn set_title_fps(&self, fps: f64) {
+    pub fn set_title_stats(&self, fps: f64, rtt_ms: Option<f64>) {
         #[cfg(not(target_arch = "wasm32"))]
-        self.window.set_title(&format!("Redixel — {fps:.0} FPS"));
+        match rtt_ms {
+            Some(ms) => self.window.set_title(&format!("Redixel — {fps:.0} FPS — {ms:.0} ms")),
+            None => self.window.set_title(&format!("Redixel — {fps:.0} FPS")),
+        }
     }
 
     /// Returns `true` for events that the window manager should process.

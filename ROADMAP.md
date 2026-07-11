@@ -88,8 +88,9 @@
 
 **Goal:** Enable real-time multiplayer with a simple, data-driven API, supporting both Desktop and Web (WASM).
 
-- [ ] **Transport Layer:** Implement an agnostic network layer. Use UDP (via a crate like `renet` or `laminar`) for fast native desktop networking, and WebRTC for WASM/Browser compatibility.
-- [ ] **Headless Mode:** Modify the `Runtime` to allow the engine to initialize without `winit` or `wgpu`. This allows the exact same game code to be compiled and run on a Linux VPS as an authoritative Dedicated Server.
-- [ ] **Fixed Update Loop:** Implement a fixed-timestep loop (`on_fixed_update`) in the `Runtime` to ensure physics and network ticks are deterministic and isolated from visual framerate fluctuations.
-- [ ] **Network API:** Expose `ctx.network()` via the `GameContext` to allow users to easily poll connection events (Connect/Disconnect) and send byte payloads using Reliable or Unreliable channels.
-- [ ] **State Serialization:** Provide basic utility traits or integrate `serde` to help developers easily compress and serialize ECS components for network transmission.
+- [x] **Transport Layer:** Implemented an agnostic, backend-swappable network layer behind the `NetworkManager` trait (`redixel-core::net`), with `redixel-net` providing a native **WebTransport (QUIC/HTTP-3)** backend and a `LoopbackNetwork` for tests and single-process hosting.
+- [x] **Headless Mode:** `RuntimeConfig::headless()` + `HeadlessRuntime` run the engine with no `winit`/`wgpu`, driving only the fixed-update loop — the same `Game` implementation runs unmodified as a dedicated server.
+- [x] **Fixed Update Loop:** `on_fixed_update` runs on a deterministic accumulator shared by the windowed and headless runtimes, decoupled from render framerate.
+- [x] **Network API:** `ctx.network()` on `GameContext` exposes inbound connection/message events, reliable and unreliable send/broadcast, and connection/tickrate queries to game code.
+- [ ] **State Serialization:** Still open — `NetworkManager` moves opaque byte payloads with no built-in (de)serialization; a reusable engine-level utility is a candidate for a future story.
+- [ ] **Browser (WASM) Transport:** Not yet implemented — deferred to a separate future story.

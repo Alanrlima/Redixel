@@ -8,13 +8,14 @@ The primary goal of this project is to build a clean, modular, and scalable engi
 
 ## Technology Stack
 
-Redixel is built on top of the modern Rust ecosystem, prioritizing safety and cross-platform compatibility (Desktop, Web & Android).
+Redixel is built on top of the modern Rust ecosystem, prioritizing safety and cross-platform compatibility (Desktop, Web, Android & iOS).
 
 | Component        | Technology  | Description                                                            |
 | :--------------- | :---------- | :--------------------------------------------------------------------- |
 | **Language**     | Rust (2024) | Memory safety and performance without garbage collection.              |
 | **Windowing**    | Winit       | Event loop management and low-level platform abstraction.              |
 | **Graphics**     | WGPU        | Portable graphics API targeting Vulkan, Metal, DX12, and WebGL/WebGPU. |
+| **Networking**   | WebTransport (`wtransport`) | QUIC/HTTP-3 transport unifying reliable and unreliable delivery on one encrypted connection. |
 | **Build System** | Cargo       | Standard Rust package manager and build tool.                          |
 
 ## Getting Started
@@ -44,7 +45,7 @@ Before you can build and run the project, you'll need to have the Rust compiler 
 To run the engine and the included `Shooter` game natively on your local machine:
 
 ```sh
-cargo run --release --bin shooter
+cargo run --release --manifest-path examples/shooter/Cargo.toml
 ```
 
 > **Note:** The `--release` flag compiles the engine with maximum optimizations, which is highly recommended to ensure stable framerates. For faster compilation times during development, you can omit this flag.
@@ -62,7 +63,7 @@ Redixel uses a pure-Rust pipeline for WebAssembly, requiring no manual HTML or J
 
 2.  **Run the example:**
     ```sh
-    cargo run --bin shooter --target wasm32-unknown-unknown
+    cargo run --manifest-path examples/shooter/Cargo.toml --target wasm32-unknown-unknown
     ```
 
 > This will automatically compile, generate bindings and start a local server at `http://127.0.0.1:1334`.
@@ -93,6 +94,8 @@ chromium \
 ```
 
 > Reference: [WebGPU Implementation Status](https://github.com/gpuweb/gpuweb/wiki/Implementation-Status#implementation-status)
+
+> **Note (Wayland):** These flags force XWayland, which can hurt performance. For best results, log into an **Xorg/X11 session** first.
 
 ### Running on Android
 
@@ -155,7 +158,7 @@ Make sure you have accepted all licenses (you can do this in Android Studio or b
    Before executing the command, ensure your phone has "Developer Options" enabled, turn on "USB Debugging", and accept the RSA key fingerprint prompt on your screen when connected via USB.
 
    ```sh
-   cargo apk run -p shooter --lib
+   cargo apk run --manifest-path examples/shooter/Cargo.toml --lib
    ```
 
 > **Note:** Logs can be inspected in real-time using `adb logcat -s REDIXEL_ENGINE`.
@@ -165,10 +168,48 @@ Make sure you have accepted all licenses (you can do this in Android Studio or b
 If you prefer to install the compiled APK manually without using USB Debugging, you can build it and find the output in the `target` directory:
 
 ```sh
-cargo apk build -p shooter --lib
+cargo apk build --manifest-path examples/shooter/Cargo.toml --lib
 ```
 
-_The generated `.apk` will be located at `target/debug/apk/shooter.apk`. You can transfer this file to your device and install it directly._
+_The generated `.apk` will be located at `examples/shooter/target/debug/apk/shooter.apk`. You can transfer this file to your device and install it directly._
+
+### Running on iOS
+
+Redixel supports iOS through the same `Game`/`GameContext` API as every other platform, exposed via an `ios_main` entry point — the same idea as Android's JNI-loaded `android_main`, just embedded into an Xcode project instead of loaded by the OS directly.
+
+> **Requires a Mac with Xcode.** Building for iOS needs Apple's proprietary SDK and frameworks (Foundation, UIKit, Metal), which only ship with Xcode — there is no cross-compilation path from Linux or Windows.
+
+1. **Add the target:**
+
+   ```sh
+   rustup target add aarch64-apple-ios
+   ```
+
+2. **Build the library:**
+
+   ```sh
+   cargo build --release --manifest-path examples/shooter/Cargo.toml --target aarch64-apple-ios --lib
+   ```
+
+3. **Embed it in an Xcode project:** link the static library (`libshooter.a`, in `examples/shooter/target/aarch64-apple-ios/release/`) into an Xcode app target with no competing `main.swift`/`AppDelegate`, set `ios_main` as that target's entry point, then build/run from Xcode as usual.
+
+> **Note:** Redixel doesn't generate the `.xcodeproj`/`.ipa` itself — that project lives in Xcode.
+
+### Multiplayer
+
+Redixel supports an **authoritative server** architecture via WebTransport (QUIC over UDP). The headless server owns all simulation; clients send input and render server snapshots. Works on LAN out of the box. For internet play, forward **UDP 5000** on the server's router.
+
+```bash
+# Server — binds to 0.0.0.0:5000 by default, or pass [bind_addr:port]
+cargo run --release --manifest-path examples/shooter_mp/Cargo.toml -- server [bind_addr:port]
+
+# Client — connects to 127.0.0.1:5000 by default, or pass [server_addr:port]
+cargo run --release --manifest-path examples/shooter_mp/Cargo.toml -- client [server_addr:port]
+```
+
+> If clients on other machines can't connect, check that **UDP 5000** is open on the server's firewall.
+
+**Cross-play:** every native platform (Windows, Linux, macOS, Android, and iOS) shares the exact same `NetworkManager`/WebTransport implementation in `redixel-net` — there's no per-platform transport code. A headless server running on Linux, a windowed client on Windows, and a client on an Android phone all speak the identical wire protocol, so they can join the same match interchangeably.
 
 ## Architecture
 
@@ -224,17 +265,18 @@ redixel/
 │   ├── redixel-platform/       # Winit: window, input, web-sys DOM injection
 │   ├── redixel-renderer/       # Wgpu: GPU device, render pass, commands
 │   ├── redixel-runtime/        # Loop, AppState, TimeManager, Settings
+│   ├── redixel-net/            # NetworkManager transports (WebTransport, loopback)
 │   └── redixel/                # Public facade API (pub use ...)
 └── examples/
     ├── pong/                   # Classic 2D game demonstrating input and physics
     ├── shooter/                # 2D top-down shooter with AI, weapons, and particles
+    ├── shooter_mp/             # Authoritative-server multiplayer shooter
     ├── triangle/               # Basic 2D rendering example
     └── triangle_3d/            # Basic 3D rendering and camera example
 ```
 
 ## Roadmap
 
-The project is currently in Phase 2 (The Graphics Core).
 For a detailed breakdown of upcoming features, including Batch Rendering, ECS, and Physics, please refer to the [ROADMAP](./ROADMAP.md).
 
 ## Contributing

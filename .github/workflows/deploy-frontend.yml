@@ -26,7 +26,7 @@ jobs:
       - name: Build WASM Examples
         run: |
           mkdir -p dist
-          PATHS=$(cargo metadata --format-version 1 --no-deps | jq -r '.packages[] | select(.metadata != null and .metadata.game != null) | .manifest_path | sub("/Cargo.toml$"; "")')
+          PATHS=$(grep -l '^\[package.metadata.game\]' examples/*/Cargo.toml | xargs -n1 dirname)
 
           for PKG_PATH in $PATHS; do
             GAME_NAME=$(basename $PKG_PATH)

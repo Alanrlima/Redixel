@@ -8,8 +8,11 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+# Internal crates
 redixel-core = { workspace = true }
 redixel-math = { workspace = true }
+
+# External crates
 log = { workspace = true }
 winit = { workspace = true }
 

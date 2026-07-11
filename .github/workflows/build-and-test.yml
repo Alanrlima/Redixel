@@ -10,6 +10,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_TARGET_DIR: ${{ github.workspace }}/target
 
 jobs:
   format:
@@ -24,7 +25,11 @@ jobs:
         run: rustup show
 
       - name: Verify Formatting (rustfmt)
-        run: cargo fmt -- --check
+        uses: ./.github/actions/cargo-each
+        with:
+          subcommand: fmt
+          args: '-- --check'
+          root-flag: ''
 
   desktop:
     name: Desktop (${{ matrix.os }})
@@ -33,7 +38,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
 
     steps:
       - name: Checkout Code
@@ -52,25 +57,93 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Lint (Clippy)
-        run: cargo clippy -- -D warnings
+        uses: ./.github/actions/cargo-each
+        with:
+          subcommand: clippy
+          args: '-- -D warnings'
+
+      - name: Lint Networking Crates (net feature)
+        uses: ./.github/actions/cargo-each
+        with:
+          subcommand: clippy
+          root-flag: '-p redixel-core -p redixel-net -p redixel-runtime -p redixel'
+          args: '--features redixel-runtime/net,redixel/net --all-targets -- -D warnings'
+          skip-examples: 'true'
 
       - name: Run Tests (Linux)
         if: runner.os == 'Linux'
-        run: |
-          export WGPU_BACKEND=vulkan
-          xvfb-run --auto-servernum cargo test --workspace --verbose
+        uses: ./.github/actions/cargo-each
+        with:
+          subcommand: test
+          args: '--verbose'
+          xvfb: 'true'
+        env:
+          WGPU_BACKEND: vulkan
+
+      - name: Test Networking Crates (net feature, Linux)
+        if: runner.os == 'Linux'
+        uses: ./.github/actions/cargo-each
+        with:
+          subcommand: test
+          root-flag: '-p redixel-core -p redixel-net -p redixel-runtime -p redixel'
+          args: '--features redixel-runtime/net,redixel/net --verbose'
+          skip-examples: 'true'
+          xvfb: 'true'
+        env:
+          WGPU_BACKEND: vulkan
 
       - name: Build Executables (Linux)
         if: runner.os == 'Linux'
-        run: cargo build --workspace --verbose
+        uses: ./.github/actions/cargo-each
+        with:
+          subcommand: build
+          args: '--verbose'
 
       - name: Run Tests (Windows)
         if: runner.os == 'Windows'
-        run: cargo test --workspace --verbose
+        uses: ./.github/actions/cargo-each
+        with:
+          subcommand: test
+          args: '--verbose'
+
+      - name: Test Networking Crates (net feature, Windows)
+        if: runner.os == 'Windows'
+        uses: ./.github/actions/cargo-each
+        with:
+          subcommand: test
+          root-flag: '-p redixel-core -p redixel-net -p redixel-runtime -p redixel'
+          args: '--features redixel-runtime/net,redixel/net --verbose'
+          skip-examples: 'true'
 
       - name: Build Executables (Windows)
         if: runner.os == 'Windows'
-        run: cargo build --workspace --verbose
+        uses: ./.github/actions/cargo-each
+        with:
+          subcommand: build
+          args: '--verbose'
+
+      - name: Run Tests (macOS)
+        if: runner.os == 'macOS'
+        uses: ./.github/actions/cargo-each
+        with:
+          subcommand: test
+          args: '--verbose'
+
+      - name: Test Networking Crates (net feature, macOS)
+        if: runner.os == 'macOS'
+        uses: ./.github/actions/cargo-each
+        with:
+          subcommand: test
+          root-flag: '-p redixel-core -p redixel-net -p redixel-runtime -p redixel'
+          args: '--features redixel-runtime/net,redixel/net --verbose'
+          skip-examples: 'true'
+
+      - name: Build Executables (macOS)
+        if: runner.os == 'macOS'
+        uses: ./.github/actions/cargo-each
+        with:
+          subcommand: build
+          args: '--verbose'
 
   wasm:
     name: WebAssembly (WASM)
@@ -88,10 +161,20 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Lint (Clippy)
-        run: cargo clippy --target wasm32-unknown-unknown -- -D warnings
+        uses: ./.github/actions/cargo-each
+        with:
+          subcommand: clippy
+          target: wasm32-unknown-unknown
+          args: '-- -D warnings'
+          exclude: shooter_mp
 
       - name: Build Executables (WASM)
-        run: cargo build --workspace --target wasm32-unknown-unknown --verbose
+        uses: ./.github/actions/cargo-each
+        with:
+          subcommand: build
+          target: wasm32-unknown-unknown
+          args: '--verbose'
+          exclude: shooter_mp
 
   android:
     name: Android (APK)
@@ -113,15 +196,58 @@ jobs:
       - name: Install Android Platform 30
         run: echo "y" | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "platforms;android-30"
 
+      - name: Configure NDK C Toolchain
+        run: |
+          NDK_BIN="$(find "$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt" -maxdepth 1 -type d -name '*-x86_64')/bin"
+          echo "$NDK_BIN" >> "$GITHUB_PATH"
+          echo "CC_aarch64_linux_android=$NDK_BIN/aarch64-linux-android24-clang" >> "$GITHUB_ENV"
+          echo "AR_aarch64_linux_android=$NDK_BIN/llvm-ar" >> "$GITHUB_ENV"
+
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
 
       - name: Lint (Clippy)
-        run: cargo clippy --target aarch64-linux-android -- -D warnings
+        uses: ./.github/actions/cargo-each
+        with:
+          subcommand: clippy
+          target: aarch64-linux-android
+          args: '--lib -- -D warnings'
 
       - name: Build Executables (Android)
+        uses: ./.github/actions/cargo-each
+        with:
+          subcommand: 'apk build'
+          args: '--lib'
+          skip-root: 'true'
+
+  ios:
+    name: iOS (Static Lib)
+    needs: format
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
         run: |
-          cargo apk build -p pong --lib
-          cargo apk build -p shooter --lib
-          cargo apk build -p triangle --lib
-          cargo apk build -p triangle_3d --lib
+          rustup target add aarch64-apple-ios
+          rustup show
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Lint (Clippy)
+        uses: ./.github/actions/cargo-each
+        with:
+          subcommand: clippy
+          target: aarch64-apple-ios
+          args: '--lib -- -D warnings'
+
+      - name: Build Examples (iOS)
+        uses: ./.github/actions/cargo-each
+        with:
+          subcommand: build
+          target: aarch64-apple-ios
+          args: '--lib'
+          skip-root: 'true'

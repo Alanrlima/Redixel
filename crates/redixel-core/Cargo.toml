@@ -8,7 +8,10 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+# Internal crates
 redixel-math = { workspace = true }
+
+# External crates
 log = { workspace = true }
 thiserror = { workspace = true }
 wgpu = { workspace = true }

@@ -5,7 +5,7 @@ use std::{
 };
 
 use serde::{Deserialize, de::DeserializeOwned};
-use serde_json::Value;
+use serde_json::{Error, Value};
 
 use wgpu::{Backends, PresentMode};
 
@@ -53,6 +53,14 @@ impl EngineSettings {
         Ok(())
     }
 
+    /// Loads `config/config.json` into the global settings, logging a warning
+    /// (and continuing with defaults) if the file is missing or malformed.
+    pub fn load_config_json() {
+        if let Err(e) = Self::global_write().load("config/config.json") {
+            log::warn!("Failed to read config/config.json, using defaults. Error: {e}");
+        }
+    }
+
     /// Retrieves a nested value using dot-notation (e.g. `"window.width"`).
     ///
     /// Returns `default` if any path segment is missing or the stored value
@@ -70,7 +78,7 @@ impl EngineSettings {
             }
         }
 
-        serde_json::from_value(node.clone()).unwrap_or_else(|_: serde_json::Error| {
+        serde_json::from_value(node.clone()).unwrap_or_else(|_: Error| {
             log::warn!("Settings key `{path}` has an unexpected type, using default.");
             default
         })

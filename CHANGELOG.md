@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),  
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.0]
+
+### Added
+
+- **Networking Core (`redixel-core::net`):**
+  - Introduced the backend-agnostic `NetworkManager` trait exposed via `ctx.network()`, covering `poll()` (drains `Connected`/`Disconnected`/`Message` events with zero-allocation borrowed payloads), `send`/`broadcast` over two delivery guarantees (`NetworkChannel::ReliableOrdered`, `UnreliableSequenced`), `rtt()`, `is_connected()`, and `server_tickrate()` for automatic client tickrate adoption.
+  - Added `ClientId`/`SERVER_ID`, `NoOpNetwork` (zero-cost default when no transport is configured), and `SequenceBuffer<T>` — a fixed-capacity ring buffer for client-side prediction/reconciliation.
+  - `Game::on_fixed_update` (default no-op) plus `GameContext::fixed_delta()`/`fixed_tick()`, run on a deterministic accumulator so simulation and network ticks stay decoupled from render framerate.
+- **`redixel-net` crate — WebTransport transport:**
+  - New crate implementing `NetworkManager` over **WebTransport (QUIC/HTTP-3)** via `wtransport`, unifying reliable and unreliable delivery on one encrypted connection: framed reliable streams for `ReliableOrdered`, and datagrams with RFC 1982 sequence framing (newest-wins, stale-drop) for `UnreliableSequenced`.
+  - Unreliable messages larger than the connection's datagram limit are **fragmented across datagrams** and reassembled newest-wins on receipt (an incomplete older sequence is abandoned the moment a newer one starts). A message that cannot be sent is dropped, never promoted onto the reliable stream — so the channel's ordering guarantee holds for payloads of any size, and a large snapshot can never head-of-line block genuine reliable traffic.
+  - `NetConfig`/`NetMode` (`Server`/`Client`/`Offline`) with `CertSource::SelfSigned` (LAN/self-host) and `CertSource::Pem` (production domain certs). The handshake exchanges a hello frame carrying the client's `protocol_id` — a mismatch closes the connection before the game ever observes the peer — and a welcome frame assigning each client its `ClientId` plus the server's authoritative tickrate. The server admits at most `max_clients` peers, turning further sessions away with an HTTP 429; a pending handshake occupies a slot, so it is bounded by a 10 s timeout that reclaims the slot and closes the connection.
+  - Every length a peer controls is bounded: reliable frames cap at 4 MiB, and datagram reassembly caps both the fragment count (1024) and the reassembled message (1 MiB), so a peer cannot size the receiver's allocations.
+  - The background tokio runtime is sized for the role — 2 worker threads on a server, 1 on a client — instead of tokio's default of one per core: the QUIC work is I/O-bound, and a client's extra workers would only contend with the render thread.
+  - `LoopbackNetwork` — an in-process server/client pair for tests and single-process hosting, exercising the same channel/sequencing semantics as the real transport.
+- **Headless / Dedicated Server mode:** `RuntimeConfig::headless()` and the new `HeadlessRuntime` run the engine with no `winit`/`wgpu`, driving only `on_start` and the fixed-update loop — the same `Game` implementation runs unmodified as an authoritative Linux VPS server. `RuntimeConfig::with_net()` enables networking on any configuration.
+- **Multiplayer example:** A new authoritative-server multiplayer twin-stick shooter demo (headless server + windowed client) demonstrating the full stack end-to-end — weapons/powerups replication, and Android/iOS mobile client support. It models the channel split the engine prescribes: superseded state (world snapshots, player input) rides `UnreliableSequenced`, while discrete one-shot events (hit/death/pickup cosmetics, batched as `EffectBatch`) ride `ReliableOrdered`, since a dropped effect would never play again. The client additionally drops any snapshot not strictly newer than the last applied tick.
+- **`redixel::prelude`** now re-exports `CertSource` and `DEFAULT_PROTOCOL_ID` alongside `NetConfig`/`NetMode` — they are the types of `NetConfig`'s `cert` and `protocol_id` fields, so without them a crate depending only on `redixel` could not configure a production TLS certificate.
+- **`net` Cargo feature:** `redixel-net` is an optional, feature-gated dependency (`redixel`/`redixel-runtime` crates) so games that don't need networking pay zero cost for it.
+- `EngineSettings::load_config_json()` helper and a new `engine.tickrate` key in `config/config.json`.
+- `TimeManager::interpolation_alpha()` (render-time interpolation support) and `set_max_substeps()` (spiral-of-death clamp, now configurable).
+- **CI:** Added a `macOS` entry to the `Desktop` job matrix (build + test + clippy on `macos-latest`) and a new dedicated `iOS` job (clippy + `--lib` build of every example for `aarch64-apple-ios`).
+- **CI: extended example coverage to every job.** `format`, `desktop`, and `wasm` invoke `--workspace`/check the root package, which no longer includes `examples/*` after the workspace restructuring above — only `android`/`ios` were already per-package (`cargo apk build`/`--manifest-path`). Added a reusable composite action (`.github/actions/cargo-each`) that runs a cargo subcommand against the root workspace and every `examples/*/Cargo.toml`, wired into all five jobs. Networked examples with heavier native dependencies are no longer excluded from the Android/iOS build steps — only the WASM job still excludes examples that don't support that target.
+- `staticlib` added to every example's `crate-type` (alongside `cdylib`/`rlib`) — the crate now also builds as a static library, the standard way to embed a Rust library in an Xcode project.
+- **iOS entry point:** `redixel::run_ios`/`run_ios_with`, using the portable `EventLoop::run_app` (winit has no `run_app_on_demand` on iOS — that's desktop-only) so no `unsafe` is needed at that layer. Each example exposes a `#[unsafe(no_mangle)] extern "C" fn ios_main()` — the same idea as Android's JNI-loaded `android_main`, just via a different OS-level mechanism. Unlike desktop/WASM, this is _not_ reached through the crate's own `fn main()`: `UIApplicationMain` must be called before anything else touches UIKit, so winit needs to own the actual process entry — the exported symbol is meant to be called from an Xcode project with no competing `main.swift`/`AppDelegate`.
+
+### Changed
+
+- **Workspace restructuring:** Examples are no longer members of the root Cargo workspace — each is now its own standalone, nested workspace with an independent `Cargo.lock`. This decouples the engine's build/test graph from per-example dependencies, at the cost of needing `--manifest-path examples/<name>/Cargo.toml` (rather than `-p <name>`) to target a specific example from the repo root.
+- **`redixel-runtime` internals:** Extracted the shared fixed-step loop (timing → network update → `on_fixed_update` → network flush) into a new internal `SimulationCore`, used identically by the windowed `Runtime` and the new `HeadlessRuntime`.
+- Updated `README.md`: all example commands now use `--manifest-path` per the workspace restructuring above; added a **Multiplayer** section documenting the authoritative-server/client workflow and required firewall port; added a Wayland/XWayland performance note; added a **Running on iOS** section.
+- `deploy-frontend.yml`: switched WASM example discovery from `cargo metadata` (which no longer sees examples now that they've left the root workspace) to a direct `grep` over `examples/*/Cargo.toml`.
+- **CI/CD Pipeline:** Enforced a global `CARGO_TARGET_DIR` environment variable across GitHub Actions. This allows the `cargo-each` script to share compiled artifacts (like `wgpu` and `tokio`) across the newly isolated example workspaces, eliminating redundant from-scratch compilations and drastically reducing CI runtimes.
+
 ## [0.2.0]
 
 ### Added
