@@ -1,5 +1,5 @@
 use thiserror::Error;
-use wgpu::{CreateSurfaceError, RequestAdapterError, RequestDeviceError, SurfaceError};
+use wgpu::{CreateSurfaceError, RequestAdapterError, RequestDeviceError};
 use winit::error::{EventLoopError, RequestError};
 
 #[cfg(target_os = "windows")]
@@ -29,8 +29,14 @@ pub enum RedixelError {
     #[error("Event loop fatal error: {0}")]
     EventLoop(#[from] EventLoopError),
 
-    #[error("Graphics surface error: {0}")]
-    Surface(#[from] SurfaceError),
+    #[error("Surface needs reconfiguration")]
+    SurfaceNeedsReconfiguration,
+
+    #[error("Surface timeout or occluded")]
+    SurfaceIgnored,
+
+    #[error("Surface validation error")]
+    SurfaceValidation,
 
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
