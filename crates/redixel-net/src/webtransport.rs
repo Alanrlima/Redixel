@@ -952,17 +952,9 @@ mod tests {
 
     use super::{HANDSHAKE_TIMEOUT, WebTransportClient, WebTransportServer};
 
-    const MAX_CLIENTS: usize = 4;
-
-    /// Wall-clock budget for a test waiting on something to happen. Deliberately
-    /// past [`HANDSHAKE_TIMEOUT`]: a budget at or below it races the server's own
-    /// give-up, so a loaded machine turns a slow handshake into a red test rather
-    /// than a slow one. Success exits early, so a healthy run never waits.
     const SETTLE_BUDGET: Duration = Duration::from_secs(HANDSHAKE_TIMEOUT.as_secs() * 3);
-
-    /// Budget for waiting on something that must *never* happen. Long enough for
-    /// a handshake to have landed if it were going to.
     const REJECT_BUDGET: Duration = Duration::from_secs(3);
+    const MAX_CLIENTS: usize = 4;
 
     fn server_on_free_port(tickrate: f64) -> WebTransportServer {
         server_with_capacity(tickrate, MAX_CLIENTS)
@@ -981,13 +973,6 @@ mod tests {
         (server, client)
     }
 
-    /// Pumps both peers until `done` observes what the test is waiting for, or
-    /// `budget` of wall-clock time elapses.
-    ///
-    /// Deadline-based rather than a fixed iteration count: under CPU contention
-    /// an iteration takes longer than its sleep, so `n` iterations buy an
-    /// unpredictable amount of real time — precisely the quantity these tests
-    /// need to bound.
     fn pump(
         server: &mut WebTransportServer,
         client: &mut WebTransportClient,

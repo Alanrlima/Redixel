@@ -175,7 +175,7 @@ _The generated `.apk` will be located at `examples/shooter/target/debug/apk/shoo
 
 ### Running on iOS
 
-Redixel supports iOS through the same `Game`/`GameContext` API as every other platform. Unlike desktop/WASM, the entry point isn't reached through this crate's own `fn main()` — `UIApplicationMain` must be called before anything else touches UIKit, so winit needs to own the actual process entry. Each example instead exposes a `#[unsafe(no_mangle)] extern "C" fn ios_main()`, the same idea as Android's JNI-loaded `android_main`, just via a different OS-level mechanism.
+Redixel supports iOS through the same `Game`/`GameContext` API as every other platform, exposed via an `ios_main` entry point — the same idea as Android's JNI-loaded `android_main`, just embedded into an Xcode project instead of loaded by the OS directly.
 
 > **Requires a Mac with Xcode.** Building for iOS needs Apple's proprietary SDK and frameworks (Foundation, UIKit, Metal), which only ship with Xcode — there is no cross-compilation path from Linux or Windows.
 
@@ -191,7 +191,9 @@ Redixel supports iOS through the same `Game`/`GameContext` API as every other pl
    cargo build --release --manifest-path examples/shooter/Cargo.toml --target aarch64-apple-ios --lib
    ```
 
-3. **Embed it in an Xcode project:** the crate builds as both a static (`libshooter.a`) and dynamic (`libshooter.dylib`) library — link the static one from `examples/shooter/target/aarch64-apple-ios/release/` into an Xcode app target **with no competing `main.swift`/`AppDelegate`** (Redixel doesn't generate the `.xcodeproj`/`.ipa` itself), then set the exported `ios_main()` symbol as that target's entry point and build/run from Xcode as usual.
+3. **Embed it in an Xcode project:** link the static library (`libshooter.a`, in `examples/shooter/target/aarch64-apple-ios/release/`) into an Xcode app target with no competing `main.swift`/`AppDelegate`, set `ios_main` as that target's entry point, then build/run from Xcode as usual.
+
+> **Note:** Redixel doesn't generate the `.xcodeproj`/`.ipa` itself — that project lives in Xcode.
 
 ### Multiplayer
 
