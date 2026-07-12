@@ -173,7 +173,7 @@ jobs:
         env:
           WGPU_BACKEND: vulkan
 
-      - name: Show Results in Job Summary
+      - name: Format Results
         run: |
           {
             echo "### FPS Benchmark"
@@ -181,7 +181,15 @@ jobs:
             echo "| Scene | FPS |"
             echo "|---|---|"
             jq -r '.[] | "| \(.name) | \(.value) |"' benchmark_result.json
-          } >> "$GITHUB_STEP_SUMMARY"
+          } > benchmark_summary.md
+
+      - name: Show Results in Job Summary
+        run: cat benchmark_summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Comment Results on PR
+        run: gh pr comment "${{ github.event.pull_request.number }}" --edit-last --create-if-none --body-file benchmark_summary.md
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   wasm:
     name: WebAssembly (WASM)
