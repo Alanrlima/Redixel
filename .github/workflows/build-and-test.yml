@@ -48,7 +48,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libasound2-dev libudev-dev libxkbcommon-x11-0 xvfb mesa-vulkan-drivers
+          sudo apt-get install -y libxkbcommon-x11-0 xvfb mesa-vulkan-drivers
 
       - name: Setup Rust
         run: rustup show
@@ -145,10 +145,50 @@ jobs:
           subcommand: build
           args: '--verbose'
 
+  benchmark:
+    name: FPS Benchmark
+    needs: format
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install Linux Graphics Deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-x11-0 xvfb mesa-vulkan-drivers
+
+      - name: Setup Rust
+        run: rustup show
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build Benchmark Tool
+        run: cargo build --release -p fps-bench
+
+      - name: Run Benchmark
+        run: xvfb-run --auto-servernum ./target/release/fps-bench benchmark_result.json
+        env:
+          WGPU_BACKEND: vulkan
+
+      - name: Show Results in Job Summary
+        run: |
+          {
+            echo "### FPS Benchmark"
+            echo
+            echo "| Scene | FPS |"
+            echo "|---|---|"
+            jq -r '.[] | "| \(.name) | \(.value) |"' benchmark_result.json
+          } >> "$GITHUB_STEP_SUMMARY"
+
   wasm:
     name: WebAssembly (WASM)
     needs: format
     runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: --cfg=web_sys_unstable_apis
 
     steps:
       - name: Checkout Code
@@ -166,7 +206,6 @@ jobs:
           subcommand: clippy
           target: wasm32-unknown-unknown
           args: '-- -D warnings'
-          exclude: shooter_mp
 
       - name: Build Executables (WASM)
         uses: ./.github/actions/cargo-each
@@ -174,7 +213,6 @@ jobs:
           subcommand: build
           target: wasm32-unknown-unknown
           args: '--verbose'
-          exclude: shooter_mp
 
   android:
     name: Android (APK)
