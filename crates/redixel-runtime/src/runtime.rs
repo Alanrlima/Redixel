@@ -14,8 +14,6 @@ use winit::{
     window::{Window, WindowId},
 };
 
-use wgpu::SurfaceError;
-
 use redixel_core::{Game, RedixelError, game::GameContext, net::NetworkManager};
 #[cfg(feature = "net")]
 use redixel_net::NetConfig;
@@ -382,8 +380,8 @@ impl<G: Game> Runtime<G> {
 
         match state.renderer.render() {
             Ok(()) => {}
-            Err(RedixelError::Surface(SurfaceError::Timeout)) => {}
-            Err(RedixelError::Surface(SurfaceError::Lost | SurfaceError::Outdated)) => {
+            Err(RedixelError::SurfaceIgnored) => {}
+            Err(RedixelError::SurfaceNeedsReconfiguration) => {
                 state.renderer.resize(state.window.surface_size());
             }
             Err(e) => {

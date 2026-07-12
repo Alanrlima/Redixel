@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use wgpu::{
-    Adapter, Backends, Device, ExperimentalFeatures, Features, Instance, InstanceDescriptor, MemoryHints,
-    PowerPreference, PresentMode, Queue, RequestAdapterOptions, Surface, SurfaceCapabilities, SurfaceConfiguration,
-    TextureFormat, TextureUsages, Trace,
+    Adapter, BackendOptions, Backends, Device, ExperimentalFeatures, Features, Instance, InstanceDescriptor,
+    InstanceFlags, MemoryBudgetThresholds, MemoryHints, PowerPreference, PresentMode, Queue, RequestAdapterOptions,
+    Surface, SurfaceCapabilities, SurfaceColorSpace, SurfaceConfiguration, TextureFormat, TextureUsages, Trace,
     wgt::{DeviceDescriptor, SurfaceConfiguration as WgtSurfaceConfiguration},
 };
 
@@ -80,9 +80,12 @@ impl GpuDevice {
     }
 
     fn create_instance(backends: Backends) -> Instance {
-        Instance::new(&InstanceDescriptor {
+        Instance::new(InstanceDescriptor {
             backends,
-            ..Default::default()
+            display: None,
+            flags: InstanceFlags::default(),
+            memory_budget_thresholds: MemoryBudgetThresholds::default(),
+            backend_options: BackendOptions::default(),
         })
     }
 
@@ -101,7 +104,7 @@ impl GpuDevice {
             unsafe {
                 instance
                     .create_surface_unsafe(SurfaceTargetUnsafe::RawHandle {
-                        raw_display_handle: window.display_handle()?.as_raw(),
+                        raw_display_handle: Some(window.display_handle()?.as_raw()),
                         raw_window_handle: window.window_handle_any_thread()?.as_raw(),
                     })
                     .map_err(RedixelError::from)
@@ -118,6 +121,7 @@ impl GpuDevice {
                 power_preference: PowerPreference::HighPerformance,
                 compatible_surface: Some(surface),
                 force_fallback_adapter: false,
+                ..Default::default()
             })
             .await
             .map_err(RedixelError::from)
@@ -169,6 +173,7 @@ impl GpuDevice {
             alpha_mode: caps.alpha_modes[0],
             view_formats: vec![format],
             desired_maximum_frame_latency: 2,
+            color_space: SurfaceColorSpace::Auto,
         }
     }
 }

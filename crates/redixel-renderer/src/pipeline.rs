@@ -96,8 +96,8 @@ impl ShapePipeline {
 
         let pipeline_layout: PipelineLayout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
             label: Some("REDIXEL_SHAPE_PIPELINE_LAYOUT"),
-            bind_group_layouts: &[&bind_group_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            ..Default::default()
         });
 
         let pipeline: RenderPipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
@@ -106,7 +106,7 @@ impl ShapePipeline {
             vertex: VertexState {
                 module: &shader,
                 entry_point: Some("vs_main"),
-                buffers: &[Vertex::layout()],
+                buffers: &[Some(Vertex::layout())],
                 compilation_options: Default::default(),
             },
             fragment: Some(FragmentState {
@@ -127,7 +127,7 @@ impl ShapePipeline {
             },
             depth_stencil: None,
             multisample: MultisampleState::default(),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
 

@@ -1,8 +1,10 @@
 use std::sync::Arc;
 
 use wgpu::{
-    Backends, CommandEncoder, CommandEncoderDescriptor, LoadOp, Operations, PresentMode, RenderPass,
-    RenderPassColorAttachment, RenderPassDescriptor, StoreOp, SurfaceTexture, TextureView, TextureViewDescriptor,
+    Backends, CommandEncoder, CommandEncoderDescriptor,
+    CurrentSurfaceTexture::{Lost, Occluded, Outdated, Suboptimal, Success, Timeout, Validation},
+    LoadOp, Operations, PresentMode, RenderPass, RenderPassColorAttachment, RenderPassDescriptor, StoreOp, Surface,
+    SurfaceTexture, TextureView, TextureViewDescriptor,
 };
 
 use winit::{
@@ -126,11 +128,10 @@ impl Renderer {
         };
 
         let (w, h): (u32, u32) = self.surface_size();
-
         let projection: Mat4 = Mat4::orthographic(0.0, w as f32, h as f32, 0.0, -1.0, 1.0);
         self.pipeline.update_camera(&self.device.queue, projection.cols);
 
-        let output: SurfaceTexture = surface.get_current_texture()?;
+        let output: SurfaceTexture = Self::get_surface_texture(surface)?;
         let view: TextureView = output.texture.create_view(&TextureViewDescriptor::default());
 
         let mut encoder: CommandEncoder = self.device.device.create_command_encoder(&CommandEncoderDescriptor {
@@ -154,6 +155,7 @@ impl Renderer {
                 depth_stencil_attachment: None,
                 occlusion_query_set: None,
                 timestamp_writes: None,
+                ..Default::default()
             });
 
             pass.set_pipeline(&self.pipeline.pipeline);
@@ -162,8 +164,17 @@ impl Renderer {
         }
 
         self.device.queue.submit(std::iter::once(encoder.finish()));
-        output.present();
+        self.device.queue.present(output);
 
         Ok(())
+    }
+
+    fn get_surface_texture(surface: &Surface) -> Result<SurfaceTexture, RedixelError> {
+        match surface.get_current_texture() {
+            Success(texture) | Suboptimal(texture) => Ok(texture),
+            Outdated | Lost => Err(RedixelError::SurfaceNeedsReconfiguration),
+            Timeout | Occluded => Err(RedixelError::SurfaceIgnored),
+            Validation => Err(RedixelError::SurfaceValidation),
+        }
     }
 }

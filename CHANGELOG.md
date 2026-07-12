@@ -37,6 +37,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **`redixel-runtime` internals:** Extracted the shared fixed-step loop (timing → network update → `on_fixed_update` → network flush) into a new internal `SimulationCore`, used identically by the windowed `Runtime` and the new `HeadlessRuntime`.
 - Updated `README.md`: all example commands now use `--manifest-path` per the workspace restructuring above; added a **Multiplayer** section documenting the authoritative-server/client workflow and required firewall port; added a Wayland/XWayland performance note; added a **Running on iOS** section.
 - `deploy-frontend.yml`: switched WASM example discovery from `cargo metadata` (which no longer sees examples now that they've left the root workspace) to a direct `grep` over `examples/*/Cargo.toml`.
+- **Graphics Backend Upgrade:** Bumped `wgpu` from v27 to v30. The render loop has been migrated to the new presentation model (`queue.present()`), and the native `CurrentSurfaceTexture` states are now cleanly abstracted into engine-agnostic `RedixelError` signals (`SurfaceIgnored`, `SurfaceNeedsReconfiguration`), fully decoupling the runtime from wgpu's internal surface management.
 - **CI/CD Pipeline:** Enforced a global `CARGO_TARGET_DIR` environment variable across GitHub Actions. This allows the `cargo-each` script to share compiled artifacts (like `wgpu` and `tokio`) across the newly isolated example workspaces, eliminating redundant from-scratch compilations and drastically reducing CI runtimes.
 
 ## [0.2.0]
