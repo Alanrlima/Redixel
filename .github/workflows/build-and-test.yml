@@ -204,6 +204,7 @@ jobs:
         uses: ./.github/actions/cargo-each
         with:
           subcommand: clippy
+          root-flag: '--workspace --exclude fps-bench'
           target: wasm32-unknown-unknown
           args: '-- -D warnings'
 
@@ -211,6 +212,7 @@ jobs:
         uses: ./.github/actions/cargo-each
         with:
           subcommand: build
+          root-flag: '--workspace --exclude fps-bench'
           target: wasm32-unknown-unknown
           args: '--verbose'
 
