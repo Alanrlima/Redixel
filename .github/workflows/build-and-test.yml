@@ -152,57 +152,6 @@ jobs:
           root-flag: '--workspace --exclude fps-bench --exclude builder'
           args: '--verbose'
 
-  benchmark:
-    name: FPS Benchmark
-    needs: format
-    runs-on: ubuntu-latest
-    permissions:
-      issues: write
-
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Install Linux Graphics Deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libxkbcommon-x11-0 xvfb mesa-vulkan-drivers
-
-      - name: Setup Rust
-        run: rustup show
-
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
-
-      - name: Build Benchmark Tool
-        run: cargo build --release -p fps-bench
-
-      - name: Run Benchmark
-        run: xvfb-run --auto-servernum ./target/release/fps-bench benchmark_result.json
-        env:
-          WGPU_BACKEND: vulkan
-
-      - name: Format Results
-        run: |
-          {
-            echo "<h3 align=\"center\">FPS Benchmark</h3>"
-            echo "<p align=\"center\"><sub>Measures CPU-side engine cost (batching, frame loop) under a software-rendered GPU — not representative of real hardware FPS.</sub></p>"
-            echo
-            echo "| Scene | Avg FPS | Avg Frame Time (ms) | P95 Frame Time (ms) | Allocations |"
-            echo "|:---:|:---:|:---:|:---:|:---:|"
-            jq -r '.tiers[] | "| \(.scene) | **\(.avg_fps)** | \(.avg_frame_ms) | \(.p95_frame_ms) | \(.allocations) (\(.allocated_bytes) B) |"' benchmark_result.json
-            echo
-            echo "<p align=\"center\"><sub>Marginal cost: <strong>$(jq -r '.marginal_ms_per_1000_quads' benchmark_result.json) ms</strong> per 1000 additional quads · P95 surfaces stutter an average would hide · allocations counted only during the sampled window.</sub></p>"
-          } > benchmark_summary.md
-
-      - name: Show Results in Job Summary
-        run: cat benchmark_summary.md >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Comment Results on PR
-        run: gh pr comment "${{ github.event.pull_request.number }}" --edit-last --create-if-none --body-file benchmark_summary.md
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
   wasm:
     name: WebAssembly (WASM)
     needs: format
@@ -311,3 +260,57 @@ jobs:
           target: aarch64-apple-ios
           args: '--lib'
           skip-root: 'true'
+
+  benchmark:
+    name: FPS Benchmark
+    needs: format
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install Linux Graphics Deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-x11-0 xvfb mesa-vulkan-drivers
+
+      - name: Setup Rust
+        run: rustup show
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build Benchmark Tool
+        run: cargo build --release -p fps-bench
+
+      - name: Run Benchmark
+        run: xvfb-run --auto-servernum ./target/release/fps-bench benchmark_result.json
+        env:
+          WGPU_BACKEND: vulkan
+
+      - name: Format Results
+        run: |
+          {
+            echo "<h3 align=\"center\">FPS Benchmark</h3>"
+            echo "<p align=\"center\"><sub>Measures CPU-side engine cost (batching, frame loop) under a software-rendered GPU — not representative of real hardware FPS.</sub></p>"
+            echo
+            echo "<table align=\"center\">"
+            echo "<thead><tr><th>Scene</th><th>Avg FPS</th><th>Avg Frame Time (ms)</th><th>P95 Frame Time (ms)</th><th>Allocations</th></tr></thead>"
+            echo "<tbody>"
+            jq -r '.tiers[] | "<tr><td>\(.scene)</td><td><strong>\(.avg_fps)</strong></td><td>\(.avg_frame_ms)</td><td>\(.p95_frame_ms)</td><td>\(.allocations) (\(.allocated_bytes) B)</td></tr>"' benchmark_result.json
+            echo "</tbody>"
+            echo "</table>"
+            echo
+            echo "<p align=\"center\"><sub>Marginal cost: <strong>$(jq -r '.marginal_ms_per_1000_quads' benchmark_result.json) ms</strong> per 1000 additional quads · P95 surfaces stutter an average would hide · allocations counted only during the sampled window.</sub></p>"
+          } > benchmark_summary.md
+
+      - name: Show Results in Job Summary
+        run: cat benchmark_summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Comment Results on PR
+        run: gh pr comment "${{ github.event.pull_request.number }}" --edit-last --create-if-none --body-file benchmark_summary.md
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
