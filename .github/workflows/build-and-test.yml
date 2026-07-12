@@ -298,9 +298,9 @@ jobs:
             echo "<p align=\"center\"><sub>Measures CPU-side engine cost (batching, frame loop) under a software-rendered GPU — not representative of real hardware FPS.</sub></p>"
             echo
             echo "<table align=\"center\">"
-            echo "<thead><tr><th>Scene</th><th>Avg FPS</th><th>Avg Frame Time (ms)</th><th>P95 Frame Time (ms)</th><th>Allocations</th></tr></thead>"
+            echo "<thead><tr><th align=\"center\">Scene</th><th align=\"center\">Avg FPS</th><th align=\"center\">Avg Frame Time (ms)</th><th align=\"center\">P95 Frame Time (ms)</th><th align=\"center\">Allocations</th></tr></thead>"
             echo "<tbody>"
-            jq -r '.tiers[] | "<tr><td>\(.scene)</td><td><strong>\(.avg_fps)</strong></td><td>\(.avg_frame_ms)</td><td>\(.p95_frame_ms)</td><td>\(.allocations) (\(.allocated_bytes) B)</td></tr>"' benchmark_result.json
+            jq -r '.tiers[] | "<tr><td align=\"center\">\(.scene)</td><td align=\"center\"><strong>\(.avg_fps)</strong></td><td align=\"center\">\(.avg_frame_ms)</td><td align=\"center\">\(.p95_frame_ms)</td><td align=\"center\">\(.allocations) (\(.allocated_bytes) B)</td></tr>"' benchmark_result.json
             echo "</tbody>"
             echo "</table>"
             echo
