@@ -77,7 +77,7 @@ impl Game for FpsBenchmark {
 }
 
 fn main() {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let results: Arc<Mutex<Vec<TierResult>>> = Arc::new(Mutex::new(Vec::with_capacity(TIERS.len())));
     let game: FpsBenchmark = FpsBenchmark {
