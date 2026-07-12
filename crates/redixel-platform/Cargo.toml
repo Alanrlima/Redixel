@@ -17,5 +17,5 @@ log = { workspace = true }
 winit = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-web-sys = { workspace = true }
+web-sys = { workspace = true, features = ["Document", "Element", "HtmlCanvasElement", "Window"] }
 wasm-bindgen = { workspace = true }

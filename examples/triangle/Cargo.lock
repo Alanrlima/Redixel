@@ -1344,15 +1344,11 @@ dependencies = [
 name = "redixel"
 version = "0.3.0"
 dependencies = [
- "console_log",
- "env_logger",
- "log",
  "redixel-core",
  "redixel-math",
  "redixel-platform",
  "redixel-renderer",
  "redixel-runtime",
- "wasm-bindgen",
  "winit",
 ]
 
@@ -1360,7 +1356,6 @@ dependencies = [
 name = "redixel-core"
 version = "0.3.0"
 dependencies = [
- "console_log",
  "log",
  "redixel-math",
  "serde_json",

@@ -16,7 +16,7 @@ redixel-math = { workspace = true }
 log = { workspace = true }
 wgpu = { workspace = true }
 winit = { workspace = true }
-bytemuck = { workspace = true }
+bytemuck = { workspace = true, features = ["derive"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wgpu = { workspace = true, features = ["webgl"] }
