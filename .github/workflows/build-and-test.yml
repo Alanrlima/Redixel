@@ -311,6 +311,9 @@ jobs:
         run: cat benchmark_summary.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Comment Results on PR
-        run: gh pr comment "${{ github.event.pull_request.number }}" --edit-last --create-if-none --body-file benchmark_summary.md
+        run: |
+          COMMENT_URL=$(gh pr comment "${{ github.event.pull_request.number }}" --edit-last --create-if-none --body-file benchmark_summary.md)
+          COMMENT_ID=$(echo "$COMMENT_URL" | grep -oE '[0-9]+$')
+          gh api "repos/${{ github.repository }}/issues/comments/$COMMENT_ID/reactions" -f content=rocket --silent
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
