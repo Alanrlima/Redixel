@@ -185,15 +185,14 @@ jobs:
       - name: Format Results
         run: |
           {
-            echo "### FPS Benchmark"
+            echo "<h3 align=\"center\">FPS Benchmark</h3>"
+            echo "<p align=\"center\"><sub>Measures CPU-side engine cost (batching, frame loop) under a software-rendered GPU — not representative of real hardware FPS.</sub></p>"
             echo
-            echo "Software-rendered (Xvfb + lavapipe) — informational only, not representative of real GPU hardware."
+            echo "| Scene | Avg FPS | Avg Frame Time (ms) | P95 Frame Time (ms) | Allocations |"
+            echo "|:---:|:---:|:---:|:---:|:---:|"
+            jq -r '.tiers[] | "| \(.scene) | **\(.avg_fps)** | \(.avg_frame_ms) | \(.p95_frame_ms) | \(.allocations) (\(.allocated_bytes) B) |"' benchmark_result.json
             echo
-            echo "| Scene | Avg FPS | Avg Frame Time | P95 Frame Time |"
-            echo "|:---|:---:|:---:|:---:|"
-            jq -r '.[] | "| \(.scene) | \(.avg_fps) | \(.avg_frame_ms) ms | \(.p95_frame_ms) ms |"' benchmark_result.json
-            echo
-            echo "[View run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+            echo "<p align=\"center\"><sub>Marginal cost: <strong>$(jq -r '.marginal_ms_per_1000_quads' benchmark_result.json) ms</strong> per 1000 additional quads · P95 surfaces stutter an average would hide · allocations counted only during the sampled window.</sub></p>"
           } > benchmark_summary.md
 
       - name: Show Results in Job Summary
