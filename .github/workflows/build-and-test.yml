@@ -4,9 +4,6 @@ on:
   pull_request:
     branches: ['main', 'develop', 'dev-*']
 
-permissions:
-  contents: read
-
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -63,6 +60,7 @@ jobs:
         uses: ./.github/actions/cargo-each
         with:
           subcommand: clippy
+          root-flag: '--workspace --exclude fps-bench --exclude builder'
           args: '-- -D warnings'
 
       - name: Lint Networking Crates (net feature)
@@ -78,6 +76,7 @@ jobs:
         uses: ./.github/actions/cargo-each
         with:
           subcommand: test
+          root-flag: '--workspace --exclude fps-bench --exclude builder'
           args: '--verbose'
           xvfb: 'true'
         env:
@@ -100,6 +99,7 @@ jobs:
         uses: ./.github/actions/cargo-each
         with:
           subcommand: build
+          root-flag: '--workspace --exclude fps-bench --exclude builder'
           args: '--verbose'
 
       - name: Run Tests (Windows)
@@ -107,6 +107,7 @@ jobs:
         uses: ./.github/actions/cargo-each
         with:
           subcommand: test
+          root-flag: '--workspace --exclude fps-bench --exclude builder'
           args: '--verbose'
 
       - name: Test Networking Crates (net feature, Windows)
@@ -123,6 +124,7 @@ jobs:
         uses: ./.github/actions/cargo-each
         with:
           subcommand: build
+          root-flag: '--workspace --exclude fps-bench --exclude builder'
           args: '--verbose'
 
       - name: Run Tests (macOS)
@@ -130,6 +132,7 @@ jobs:
         uses: ./.github/actions/cargo-each
         with:
           subcommand: test
+          root-flag: '--workspace --exclude fps-bench --exclude builder'
           args: '--verbose'
 
       - name: Test Networking Crates (net feature, macOS)
@@ -146,6 +149,7 @@ jobs:
         uses: ./.github/actions/cargo-each
         with:
           subcommand: build
+          root-flag: '--workspace --exclude fps-bench --exclude builder'
           args: '--verbose'
 
   benchmark:
@@ -153,8 +157,6 @@ jobs:
     needs: format
     runs-on: ubuntu-latest
     permissions:
-      pull-requests: write
-      contents: read
       issues: write
 
     steps:
@@ -185,9 +187,13 @@ jobs:
           {
             echo "### FPS Benchmark"
             echo
-            echo "| Scene | FPS |"
-            echo "|---|---|"
-            jq -r '.[] | "| \(.name) | \(.value) |"' benchmark_result.json
+            echo "Software-rendered (Xvfb + lavapipe) — informational only, not representative of real GPU hardware."
+            echo
+            echo "| Scene | Avg FPS | Avg Frame Time | P95 Frame Time |"
+            echo "|:---|:---:|:---:|:---:|"
+            jq -r '.[] | "| \(.scene) | \(.avg_fps) | \(.avg_frame_ms) ms | \(.p95_frame_ms) ms |"' benchmark_result.json
+            echo
+            echo "[View run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
           } > benchmark_summary.md
 
       - name: Show Results in Job Summary
@@ -219,7 +225,7 @@ jobs:
         uses: ./.github/actions/cargo-each
         with:
           subcommand: clippy
-          root-flag: '--workspace --exclude fps-bench'
+          root-flag: '--workspace --exclude fps-bench --exclude builder'
           target: wasm32-unknown-unknown
           args: '-- -D warnings'
 
@@ -227,7 +233,7 @@ jobs:
         uses: ./.github/actions/cargo-each
         with:
           subcommand: build
-          root-flag: '--workspace --exclude fps-bench'
+          root-flag: '--workspace --exclude fps-bench --exclude builder'
           target: wasm32-unknown-unknown
           args: '--verbose'
 

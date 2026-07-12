@@ -9,15 +9,13 @@ use redixel_renderer::RendererConfig;
 const WARMUP_FRAMES: u32 = 60;
 const MEASURE_FRAMES: u32 = 300;
 
-const TIERS: [(usize, &str); 3] = [
-    (500, "Render FPS (500 quads)"),
-    (2000, "Render FPS (2000 quads)"),
-    (8000, "Render FPS (8000 quads)"),
-];
+const TIERS: [(usize, &str); 3] = [(500, "500 quads"), (2000, "2000 quads"), (8000, "8000 quads")];
 
 struct TierResult {
-    name: &'static str,
+    scene: &'static str,
     avg_fps: f64,
+    avg_frame_ms: f64,
+    p95_frame_ms: f64,
 }
 
 struct FpsBenchmark {
@@ -33,6 +31,17 @@ impl FpsBenchmark {
     }
 }
 
+fn round2(value: f64) -> f64 {
+    (value * 100.0).round() / 100.0
+}
+
+fn percentile_ms(samples: &[f64], p: f64) -> f64 {
+    let mut sorted: Vec<f64> = samples.to_vec();
+    sorted.sort_by(|a: &f64, b: &f64| a.partial_cmp(b).unwrap());
+    let idx: usize = ((sorted.len() as f64 - 1.0) * p).round() as usize;
+    sorted[idx] * 1000.0
+}
+
 impl Game for FpsBenchmark {
     type Action = ();
 
@@ -46,10 +55,18 @@ impl Game for FpsBenchmark {
         }
 
         if self.frame >= WARMUP_FRAMES + MEASURE_FRAMES {
-            let (_, name) = TIERS[self.tier_index];
+            let (_, scene): (usize, &str) = TIERS[self.tier_index];
             let total_delta: f64 = self.samples.iter().sum();
             let avg_fps: f64 = self.samples.len() as f64 / total_delta;
-            self.results.lock().unwrap().push(TierResult { name, avg_fps });
+            let avg_frame_ms: f64 = (total_delta / self.samples.len() as f64) * 1000.0;
+            let p95_frame_ms: f64 = percentile_ms(&self.samples, 0.95);
+
+            self.results.lock().unwrap().push(TierResult {
+                scene,
+                avg_fps: round2(avg_fps),
+                avg_frame_ms: round2(avg_frame_ms),
+                p95_frame_ms: round2(p95_frame_ms),
+            });
 
             self.tier_index += 1;
             self.frame = 0;
@@ -108,11 +125,19 @@ fn main() {
     let json_results: Vec<serde_json::Value> = data
         .iter()
         .map(|r: &TierResult| {
-            log::info!("{}: {:.2} fps", r.name, r.avg_fps);
+            log::info!(
+                "{}: {:.2} fps (avg {:.2} ms, p95 {:.2} ms)",
+                r.scene,
+                r.avg_fps,
+                r.avg_frame_ms,
+                r.p95_frame_ms
+            );
+
             serde_json::json!({
-                "name": r.name,
-                "unit": "fps",
-                "value": (r.avg_fps * 100.0).round() / 100.0,
+                "scene": r.scene,
+                "avg_fps": r.avg_fps,
+                "avg_frame_ms": r.avg_frame_ms,
+                "p95_frame_ms": r.p95_frame_ms,
             })
         })
         .collect();
