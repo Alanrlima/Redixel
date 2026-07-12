@@ -17,7 +17,7 @@ mod native {
 
     use redixel::prelude::{HeadlessRuntime, NetConfig, RedixelError, RuntimeConfig};
 
-    use crate::{client::Client, server::Server, DEFAULT_PORT};
+    use crate::{DEFAULT_PORT, client::Client, server::Server};
 
     pub fn native_main() -> Result<(), RedixelError> {
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -79,7 +79,7 @@ mod android {
 
     use redixel::prelude::NetConfig;
 
-    use crate::{client::Client, SERVER_ADDR};
+    use crate::{SERVER_ADDR, client::Client};
 
     #[unsafe(no_mangle)]
     pub fn android_main(app: AndroidApp) {
@@ -105,7 +105,7 @@ mod ios {
 
     use redixel::prelude::NetConfig;
 
-    use crate::{client::Client, SERVER_ADDR};
+    use crate::{SERVER_ADDR, client::Client};
 
     #[unsafe(no_mangle)]
     pub extern "C" fn ios_main() {
@@ -126,7 +126,7 @@ mod wasm {
 
     use redixel::prelude::{NetConfig, RedixelError};
 
-    use crate::{client::Client, SERVER_ADDR};
+    use crate::{SERVER_ADDR, client::Client};
 
     /// SHA-256 hash (64 lowercase hex chars, no separators) of the server's
     /// self-signed certificate, logged by the native server on startup —
