@@ -4,6 +4,9 @@ on:
   pull_request:
     branches: ['main', 'develop', 'dev-*']
 
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -149,6 +152,10 @@ jobs:
     name: FPS Benchmark
     needs: format
     runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      contents: read
+      issues: write
 
     steps:
       - name: Checkout Code
