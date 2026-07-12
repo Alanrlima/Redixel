@@ -1,6 +1,5 @@
 /// Bytes of header prepended to each unreliable datagram:
 /// `[u32 seq][u16 fragment index][u16 fragment count]`, little-endian.
-#[cfg(not(target_arch = "wasm32"))]
 pub const HEADER_LEN: usize = 8;
 
 /// Most fragments one unreliable message may be split into.
@@ -8,13 +7,11 @@ pub const HEADER_LEN: usize = 8;
 /// A peer picks `count` freely, and the receiver sizes its slot table from it,
 /// so this bounds the allocation a single datagram can provoke. At a ~1.2 KB
 /// datagram limit this still covers messages past [`MAX_MESSAGE_LEN`].
-#[cfg(not(target_arch = "wasm32"))]
 pub const MAX_FRAGMENTS: u16 = 1024;
 
 /// Upper bound on a reassembled unreliable message. Fragments accumulate in
 /// memory until the message completes, so this bounds what a peer can pin per
 /// connection before anything is delivered.
-#[cfg(not(target_arch = "wasm32"))]
 pub const MAX_MESSAGE_LEN: usize = 1024 * 1024;
 
 /// Returns `true` if `a` is strictly newer than `b`, using serial-number
@@ -43,7 +40,6 @@ pub fn accept_seq(last: &mut Option<u32>, seq: u32) -> bool {
 
 /// Writes the header for fragment `index` of `count` belonging to `seq` into
 /// `out` (cleared first), then appends `payload`, reusing `out`'s capacity.
-#[cfg(not(target_arch = "wasm32"))]
 #[inline]
 pub fn frame(out: &mut Vec<u8>, seq: u32, index: u16, count: u16, payload: &[u8]) {
     out.clear();
@@ -55,7 +51,6 @@ pub fn frame(out: &mut Vec<u8>, seq: u32, index: u16, count: u16, payload: &[u8]
 
 /// Splits a received datagram into `(seq, fragment index, fragment count, payload)`,
 /// or `None` if it is too short to contain a header.
-#[cfg(not(target_arch = "wasm32"))]
 #[inline]
 pub fn split(msg: &[u8]) -> Option<(u32, u16, u16, &[u8])> {
     if msg.len() < HEADER_LEN {
@@ -80,7 +75,6 @@ pub fn split(msg: &[u8]) -> Option<(u32, u16, u16, &[u8])> {
 /// Both the fragment count and the accumulated payload are bounded
 /// ([`MAX_FRAGMENTS`], [`MAX_MESSAGE_LEN`]): the counts come straight off the
 /// wire, so a peer must not be able to size our allocations for us.
-#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Default)]
 pub struct Reassembler {
     seq: Option<u32>,
@@ -89,7 +83,6 @@ pub struct Reassembler {
     received_len: usize,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl Reassembler {
     pub fn new() -> Self {
         Self::default()

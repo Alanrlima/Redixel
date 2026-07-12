@@ -39,6 +39,10 @@ pub enum CertSource {
 /// - `server_name` (client only) selects TLS mode: `Some` validates against a
 ///   real domain cert (online), `None` connects by IP with validation disabled
 ///   (LAN).
+/// - `server_cert_hash`: SHA-256 digest of the server's self-signed
+///   certificate, pinned via `WebTransportOptions.serverCertificateHashes`.
+///   Consumed only by the wasm client (browsers require it to trust a
+///   self-signed cert); native and mobile clients ignore this field entirely.
 #[derive(Debug, Clone)]
 pub struct NetConfig {
     pub mode: NetMode,
@@ -46,6 +50,7 @@ pub struct NetConfig {
     pub protocol_id: u64,
     pub cert: CertSource,
     pub server_name: Option<String>,
+    pub server_cert_hash: Option<[u8; 32]>,
 }
 
 impl NetConfig {
@@ -57,6 +62,7 @@ impl NetConfig {
             protocol_id: DEFAULT_PROTOCOL_ID,
             cert: CertSource::default(),
             server_name: None,
+            server_cert_hash: None,
         }
     }
 
@@ -68,7 +74,15 @@ impl NetConfig {
             protocol_id: DEFAULT_PROTOCOL_ID,
             cert: CertSource::default(),
             server_name: None,
+            server_cert_hash: None,
         }
+    }
+
+    /// Pins the server's self-signed certificate hash for the wasm client
+    /// (see [`NetConfig::server_cert_hash`]).
+    pub fn with_server_cert_hash(mut self, hash: [u8; 32]) -> Self {
+        self.server_cert_hash = Some(hash);
+        self
     }
 }
 
@@ -96,5 +110,17 @@ pub fn build(config: &NetConfig, tickrate: f64) -> Box<dyn NetworkManager> {
     #[cfg(target_arch = "wasm32")]
     {
         crate::wasm::build(config, tickrate)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn with_server_cert_hash_round_trips() {
+        let hash: [u8; 32] = [7; 32];
+        let config: NetConfig = NetConfig::client("127.0.0.1:0".parse().unwrap()).with_server_cert_hash(hash);
+        assert_eq!(config.server_cert_hash, Some(hash));
     }
 }

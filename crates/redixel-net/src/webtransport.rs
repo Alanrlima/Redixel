@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    fmt::Write,
     io,
     net::SocketAddr,
     sync::{
@@ -22,13 +23,17 @@ use wtransport::{
     endpoint::{IncomingSession, SessionRequest, endpoint_side},
     error::StreamWriteError,
     stream::OpeningBiStream,
-    tls::error::{InvalidSan, PemLoadError},
+    tls::{
+        Certificate,
+        error::{InvalidSan, PemLoadError},
+    },
 };
 
 use redixel_core::{ClientId, NetworkChannel, NetworkEvent, NetworkManager, NoOpNetwork, SERVER_ID};
 
 use crate::{
     config::{CertSource, NetConfig, NetMode},
+    frame::parse_welcome,
     inbound::{Inbound, InboundQueue},
     seq,
 };
@@ -523,6 +528,7 @@ async fn handshake_server(
 pub struct WebTransportServer {
     _runtime: Runtime,
     local_addr: SocketAddr,
+    cert_hash: Option<[u8; 32]>,
     inbound_rx: UnboundedReceiver<InboundEvent>,
     outbound_tx: UnboundedSender<Outgoing>,
     queue: InboundQueue<Vec<u8>>,
@@ -566,14 +572,25 @@ impl WebTransportServer {
         let (outbound_tx, outbound_rx): (UnboundedSender<Outgoing>, UnboundedReceiver<Outgoing>) = unbounded_channel();
 
         let cert: CertSource = cert.clone();
-        let endpoint: Endpoint<endpoint_side::Server> = runtime.block_on(async move {
-            let identity: Identity = make_identity(&cert).await?;
-            let config: ServerConfig = ServerConfig::builder()
-                .with_bind_address(bind)
-                .with_identity(identity)
-                .build();
-            Endpoint::server(config)
-        })?;
+        let (endpoint, cert_hash): (Endpoint<endpoint_side::Server>, Option<[u8; 32]>) =
+            runtime.block_on(async move {
+                let identity: Identity = make_identity(&cert).await?;
+                let cert_hash: Option<[u8; 32]> = match &cert {
+                    CertSource::SelfSigned => identity
+                        .certificate_chain()
+                        .as_slice()
+                        .first()
+                        .map(|c: &Certificate| *c.hash().as_ref()),
+                    CertSource::Pem { .. } => None,
+                };
+
+                let config: ServerConfig = ServerConfig::builder()
+                    .with_bind_address(bind)
+                    .with_identity(identity)
+                    .build();
+
+                io::Result::Ok((Endpoint::server(config)?, cert_hash))
+            })?;
 
         let local_addr: SocketAddr = endpoint.local_addr()?;
         runtime.spawn(run_server(
@@ -589,6 +606,7 @@ impl WebTransportServer {
         Ok(Self {
             _runtime: runtime,
             local_addr,
+            cert_hash,
             inbound_rx,
             outbound_tx,
             queue: InboundQueue::new(),
@@ -598,6 +616,13 @@ impl WebTransportServer {
     /// The actual bound address (useful when binding to port 0).
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
+    }
+
+    /// SHA-256 digest of the server's self-signed certificate, for wasm clients
+    /// to pin via [`NetConfig::with_server_cert_hash`](crate::NetConfig::with_server_cert_hash).
+    /// `None` for [`CertSource::Pem`] (a CA-trusted cert needs no pinning).
+    pub fn cert_hash(&self) -> Option<[u8; 32]> {
+        self.cert_hash
     }
 }
 
@@ -696,26 +721,13 @@ async fn run_client(
         }
     };
 
-    let id: ClientId = match welcome.get(0..8).and_then(|b: &[u8]| b.try_into().ok()) {
-        Some(bytes) => u64::from_le_bytes(bytes),
+    let (id, tickrate): (ClientId, f64) = match parse_welcome(&welcome) {
+        Some(parsed) => parsed,
         None => {
             log::error!("webtransport: malformed welcome");
             return;
         }
     };
-
-    let tickrate: f64 = match welcome.get(8..WELCOME_LEN).and_then(|b: &[u8]| b.try_into().ok()) {
-        Some(bytes) => f64::from_le_bytes(bytes),
-        None => {
-            log::error!("webtransport: welcome frame missing tickrate");
-            return;
-        }
-    };
-
-    if !tickrate.is_finite() || tickrate <= 0.0 {
-        log::error!("webtransport: server announced a non-positive tickrate of {tickrate}");
-        return;
-    }
 
     server_tickrate.store(tickrate.to_bits(), Ordering::Relaxed);
     inbound_tx.send(Inbound::Connected(id)).ok();
@@ -888,6 +900,17 @@ impl NetworkManager for WebTransportClient {
     fn flush(&mut self) {}
 }
 
+/// Hex-encodes `bytes` as a lowercase string with no separators.
+fn to_hex(bytes: &[u8]) -> String {
+    let mut out: String = String::with_capacity(bytes.len() * 2);
+
+    for byte in bytes {
+        write!(out, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+
+    out
+}
+
 /// Builds the native WebTransport [`NetworkManager`] for `config`, degrading to a
 /// [`NoOpNetwork`] (with a logged error) on failure. `tickrate` is the local
 /// authoritative rate; a server embeds it in its welcome frame, a client
@@ -898,6 +921,9 @@ pub fn build(config: &NetConfig, tickrate: f64) -> Box<dyn NetworkManager> {
             match WebTransportServer::new(*bind, &config.cert, tickrate, config.protocol_id, config.max_clients) {
                 Ok(server) => {
                     log::info!("WebTransport server listening on {bind} (max {} clients).", config.max_clients);
+                    if let Some(hash) = server.cert_hash() {
+                        log::info!("WebTransport server certificate hash (sha-256): {}", to_hex(&hash));
+                    }
                     Box::new(server)
                 }
                 Err(e) => {
@@ -927,8 +953,11 @@ pub fn build(config: &NetConfig, tickrate: f64) -> Box<dyn NetworkManager> {
 #[cfg(test)]
 mod tests {
     use std::net::SocketAddr;
+    use std::path::PathBuf;
     use std::thread::sleep;
     use std::time::{Duration, Instant};
+
+    use wtransport::Identity;
 
     use redixel_core::{NetworkChannel, NetworkEvent, NetworkManager, SERVER_ID};
 
@@ -986,6 +1015,51 @@ mod tests {
         let server: WebTransportServer = server_on_free_port(60.0);
         assert!(server.is_server());
         assert_eq!(server.local_client(), None);
+    }
+
+    #[test]
+    fn cert_hash_is_some_for_self_signed_and_none_for_pem() {
+        let bind: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let self_signed: WebTransportServer =
+            WebTransportServer::new(bind, &CertSource::SelfSigned, 60.0, DEFAULT_PROTOCOL_ID, MAX_CLIENTS)
+                .expect("server binds");
+
+        assert!(self_signed.cert_hash().is_some());
+
+        let dir: PathBuf = std::env::temp_dir();
+        let cert_path: PathBuf = dir.join("redixel-net-test-cert-hash-cert.pem");
+        let key_path: PathBuf = dir.join("redixel-net-test-cert-hash-key.pem");
+
+        let identity: Identity = Identity::self_signed(["localhost"]).expect("self-signed identity");
+        let runtime: tokio::runtime::Runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+        runtime.block_on(async {
+            identity
+                .certificate_chain()
+                .store_pemfile(&cert_path)
+                .await
+                .expect("store cert pemfile");
+            identity
+                .private_key()
+                .store_secret_pemfile(&key_path)
+                .await
+                .expect("store key pemfile");
+        });
+
+        let pem_server: WebTransportServer = WebTransportServer::new(
+            bind,
+            &CertSource::Pem {
+                cert: cert_path.clone(),
+                key: key_path.clone(),
+            },
+            60.0,
+            DEFAULT_PROTOCOL_ID,
+            MAX_CLIENTS,
+        )
+        .expect("server binds with pem cert");
+        assert!(pem_server.cert_hash().is_none());
+
+        std::fs::remove_file(&cert_path).ok();
+        std::fs::remove_file(&key_path).ok();
     }
 
     #[test]
