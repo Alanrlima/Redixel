@@ -1,24 +1,25 @@
 use std::{
-    cell::{Cell, RefCell},
+    cell::{Cell, RefCell, RefMut},
     collections::VecDeque,
+    mem,
     net::SocketAddr,
     rc::Rc,
 };
 
-use js_sys::Uint8Array;
+use js_sys::{Function, Promise, Uint8Array};
 
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::{JsFuture, spawn_local};
 
 use web_sys::{
     ReadableStreamDefaultReader, WebTransport, WebTransportBidirectionalStream, WebTransportDatagramDuplexStream,
-    WebTransportHash, WebTransportOptions, WritableStreamDefaultWriter,
+    WebTransportHash, WebTransportOptions, Window, WorkerGlobalScope, WritableStreamDefaultWriter,
 };
 
 use redixel_core::{ClientId, NetworkChannel, NetworkEvent, NetworkManager, NoOpNetwork, SERVER_ID};
 
 use crate::{
-    config::{NetConfig, NetMode},
+    config::{HANDSHAKE_TIMEOUT, NetConfig, NetMode},
     frame::parse_welcome,
     inbound::{Inbound, InboundQueue},
     seq,
@@ -36,6 +37,21 @@ const MAX_FRAME_LEN: usize = 4 * 1024 * 1024;
 /// tasks and `update`/`poll` only ever interleave at `.await` points on the
 /// same thread.
 type Mailbox = Rc<RefCell<VecDeque<Inbound<Vec<u8>>>>>;
+
+/// Reliable frames waiting to be written, in send order. Drained by a single
+/// [`reliable_pump`] task so that frames reach the wire in the order they were
+/// queued — see [`WasmWebTransportClient::flush`].
+type SendQueue = Rc<RefCell<VecDeque<Vec<u8>>>>;
+
+/// Latches once the connection is terminally gone — a handshake that never
+/// completed, a reliable write that failed, or a reader stream that ended.
+///
+/// A dropped connection is terminal (the transport never reconnects, matching
+/// native), so this both stops [`flush`](WasmWebTransportClient::flush) from
+/// queueing traffic nobody will ever read and bounds the outbound backlog: a
+/// client whose server never comes up buffers only until the handshake watchdog
+/// fires, not forever.
+type Dead = Rc<Cell<bool>>;
 
 /// The reliable-stream writer, datagram writer, and the datagram duplex
 /// stream itself (needed for `max_datagram_size()`), available once the
@@ -71,6 +87,37 @@ fn new_transport(url: &str, config: &NetConfig) -> Result<WebTransport, JsValue>
         Some(hash) => WebTransport::new_with_options(url, &build_options(hash)),
         None => WebTransport::new(url),
     }
+}
+
+/// Resolves after `ms` milliseconds, via the browser's `setTimeout`. wasm32 has
+/// no tokio, so this is the only timer available to the transport.
+///
+/// Resolves through whichever global scope is hosting us — a `Window` on the
+/// main thread, a `WorkerGlobalScope` in a worker — and, if neither exposes
+/// `setTimeout`, resolves immediately rather than leaving the caller pending
+/// forever. A watchdog that never fires is the very failure it exists to
+/// prevent, so it must fail closed.
+async fn sleep(ms: i32) {
+    let promise: Promise = Promise::new(&mut |resolve: Function, _reject: Function| {
+        let global: JsValue = js_sys::global().into();
+
+        let scheduled: Option<i32> = match global.dyn_ref::<Window>() {
+            Some(w) => w
+                .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, ms)
+                .ok(),
+            None => global.dyn_ref::<WorkerGlobalScope>().and_then(|w: &WorkerGlobalScope| {
+                w.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, ms)
+                    .ok()
+            }),
+        };
+
+        if scheduled.is_none() {
+            log::error!("wasm webtransport: no setTimeout in this global scope; firing the timer immediately.");
+            resolve.call0(&JsValue::NULL).ok();
+        }
+    });
+
+    JsFuture::from(promise).await.ok();
 }
 
 /// Writes one length-prefixed (`[u32 len][payload]`, little-endian) frame to
@@ -139,7 +186,7 @@ async fn read_frame_wasm(reader: &ReadableStreamDefaultReader, buf: &mut Vec<u8>
 /// ends, then signals disconnection — the wasm counterpart to native's
 /// `reliable_reader` plus its connection-closed watcher, since a browser
 /// `WebTransport` exposes no separate connection-level close signal here.
-async fn reliable_reader_wasm(reader: ReadableStreamDefaultReader, mut buf: Vec<u8>, mailbox: Mailbox) {
+async fn reliable_reader_wasm(reader: ReadableStreamDefaultReader, mut buf: Vec<u8>, mailbox: Mailbox, dead: Dead) {
     while let Some(payload) = read_frame_wasm(&reader, &mut buf).await {
         mailbox.borrow_mut().push_back(Inbound::Message {
             client: SERVER_ID,
@@ -148,6 +195,7 @@ async fn reliable_reader_wasm(reader: ReadableStreamDefaultReader, mut buf: Vec<
         });
     }
 
+    dead.set(true);
     mailbox.borrow_mut().push_back(Inbound::Disconnected(SERVER_ID));
 }
 
@@ -177,63 +225,87 @@ async fn datagram_reader_wasm(reader: ReadableStreamDefaultReader, mailbox: Mail
     }
 }
 
-/// Fragments `payload` across one or more datagram-sized frames sized to
-/// `max_datagram`, appending each already-framed fragment to `out` — the
-/// synchronous half of native's `send_unreliable`. Browser datagram writes
-/// are async (`WritableStreamDefaultWriter::write_with_chunk`), so wasm
-/// splits framing (here, synchronous) from the actual write (`flush`'s
-/// spawned task) — native doesn't need this split since `send_datagram` is
-/// itself synchronous.
+/// Fragments `payload` into already-framed datagrams sized to `max_datagram`,
+/// appending each to `out` — the synchronous half of native's `send_unreliable`.
+/// Browser datagram writes are async
+/// (`WritableStreamDefaultWriter::write_with_chunk`), so wasm splits framing
+/// (here, synchronous) from the actual write (`flush`'s spawned task) — native
+/// doesn't need this split since `send_datagram` is itself synchronous.
+///
+/// The chunking itself comes from [`seq::plan`]/[`seq::fragments`], shared with
+/// native, so the two backends cannot drift apart on the wire format.
 ///
 /// Unreliable by contract: a message that cannot be sent is **dropped**,
 /// never promoted onto the reliable stream, matching native.
-fn frame_unreliable(
-    max_datagram: u32,
-    scratch: &mut Vec<u8>,
-    send_seq: &mut u32,
-    payload: &[u8],
-    out: &mut Vec<Vec<u8>>,
-) {
-    let max_datagram: usize = max_datagram as usize;
-    if max_datagram <= seq::HEADER_LEN {
-        log::warn!("Datagram limit of {max_datagram} bytes cannot fit the sequence header; dropping.");
-        return;
-    }
-
-    if payload.len() > seq::MAX_MESSAGE_LEN {
-        log::warn!(
-            "Dropping a {}-byte unreliable message over the {}-byte reassembly limit.",
-            payload.len(),
-            seq::MAX_MESSAGE_LEN
-        );
-
-        return;
-    }
-
-    let chunk: usize = max_datagram - seq::HEADER_LEN;
-    let count: usize = payload.len().div_ceil(chunk).max(1);
-    if count > seq::MAX_FRAGMENTS as usize {
-        log::warn!(
-            "An unreliable message of {} bytes needs {count} fragments, over the {} limit; dropping.",
-            payload.len(),
-            seq::MAX_FRAGMENTS
-        );
-
-        return;
-    }
+fn frame_unreliable(max_datagram: u32, send_seq: &mut u32, payload: &[u8], out: &mut Vec<Vec<u8>>) {
+    let plan: seq::Plan<'_> = match seq::Plan::new(max_datagram as usize, payload) {
+        Ok(plan) => plan,
+        Err(e) => {
+            log::warn!("{e}");
+            return;
+        }
+    };
 
     let current: u32 = *send_seq;
     *send_seq = send_seq.wrapping_add(1);
 
-    if payload.is_empty() {
-        seq::frame(scratch, current, 0, 1, &[]);
-        out.push(scratch.clone());
-        return;
+    for (index, fragment) in plan.fragments() {
+        let mut framed: Vec<u8> = Vec::with_capacity(seq::HEADER_LEN + fragment.len());
+        seq::frame(&mut framed, current, index, plan.count(), fragment);
+        out.push(framed);
     }
+}
 
-    for (index, fragment) in payload.chunks(chunk).enumerate() {
-        seq::frame(scratch, current, index as u16, count as u16, fragment);
-        out.push(scratch.clone());
+/// Drains `queue` onto the reliable stream, one length-prefixed frame at a
+/// time, until it runs dry — then clears `running` so the next
+/// [`flush`](WasmWebTransportClient::flush) starts a fresh pump.
+///
+/// Exactly one pump is ever alive (guarded by `running`), which is what keeps
+/// [`NetworkChannel::ReliableOrdered`] ordered: a browser write can stall on
+/// backpressure for many ticks, and a fresh task per flush would let a later
+/// tick's frame enqueue ahead of an earlier tick's remaining ones. This mirrors
+/// native's single long-lived `reliable_writer`.
+///
+/// A failed write means the stream is gone for good: the connection is marked
+/// dead, the queue is dropped and the pump stops, matching native's
+/// break-on-error. Marking it dead is what stops the next `flush` from starting
+/// a fresh pump over the same broken writer, once per tick, forever.
+async fn reliable_pump(writer: WritableStreamDefaultWriter, queue: SendQueue, running: Rc<Cell<bool>>, dead: Dead) {
+    loop {
+        let next: Option<Vec<u8>> = queue.borrow_mut().pop_front();
+
+        let Some(payload) = next else {
+            running.set(false);
+            return;
+        };
+
+        if let Err(e) = write_frame_wasm(&writer, &payload).await {
+            log::warn!(
+                "wasm webtransport: reliable write failed: {e:?}; dropping {} queued frames.",
+                queue.borrow().len()
+            );
+
+            dead.set(true);
+            queue.borrow_mut().clear();
+            running.set(false);
+            return;
+        }
+    }
+}
+
+/// Closes `transport` if the handshake has not finished within
+/// [`HANDSHAKE_TIMEOUT`], so a server that accepts the stream and then goes
+/// silent cannot leave the client waiting for a welcome frame forever.
+///
+/// Closing the session makes the pending welcome read resolve, which drops
+/// [`connect_wasm`] into its existing failure path — no cross-future
+/// cancellation machinery needed.
+async fn handshake_watchdog(transport: WebTransport, done: Rc<Cell<bool>>) {
+    sleep(HANDSHAKE_TIMEOUT.as_millis() as i32).await;
+
+    if !done.get() {
+        log::error!("wasm webtransport: handshake did not complete within {HANDSHAKE_TIMEOUT:?}; closing.");
+        transport.close();
     }
 }
 
@@ -241,26 +313,33 @@ fn frame_unreliable(
 /// bidirectional stream, announces `protocol_id` and exchanges the
 /// hello/welcome (reusing the same wire format as native via
 /// [`parse_welcome`]), then hands off to the reliable and datagram reader
-/// tasks. Any failure along the way is logged and simply leaves the client
-/// permanently unconnected — matching native's fail-soft behavior for a
-/// connection that never completes.
+/// tasks. Returns `false` if the connection never came up, so the caller can
+/// mark it [`Dead`] — a client that fails here stays permanently unconnected,
+/// matching native's fail-soft behavior.
+///
+/// The whole handshake runs under a [`handshake_watchdog`], so it cannot hang
+/// indefinitely on an unresponsive server.
 async fn connect_wasm(
     transport: WebTransport,
     protocol_id: u64,
     mailbox: Mailbox,
     writers: Rc<RefCell<Option<Writers>>>,
     server_tickrate: Rc<Cell<f64>>,
-) {
+    dead: Dead,
+) -> bool {
+    let done: Rc<Cell<bool>> = Rc::new(Cell::new(false));
+    spawn_local(handshake_watchdog(transport.clone(), done.clone()));
+
     if let Err(e) = JsFuture::from(transport.ready()).await {
         log::error!("wasm webtransport: connection failed: {e:?}");
-        return;
+        return false;
     }
 
     let bidi: WebTransportBidirectionalStream = match JsFuture::from(transport.create_bidirectional_stream()).await {
         Ok(stream) => stream.unchecked_into(),
         Err(e) => {
             log::error!("wasm webtransport: create_bidirectional_stream failed: {e:?}");
-            return;
+            return false;
         }
     };
 
@@ -268,7 +347,7 @@ async fn connect_wasm(
         Ok(writer) => writer,
         Err(e) => {
             log::error!("wasm webtransport: get_writer failed: {e:?}");
-            return;
+            return false;
         }
     };
 
@@ -279,7 +358,7 @@ async fn connect_wasm(
         .is_err()
     {
         log::error!("wasm webtransport: failed to send hello");
-        return;
+        return false;
     }
 
     let mut buf: Vec<u8> = Vec::new();
@@ -287,7 +366,7 @@ async fn connect_wasm(
         Some(frame) => frame,
         None => {
             log::error!("wasm webtransport: server closed before the welcome frame (protocol id mismatch?)");
-            return;
+            return false;
         }
     };
 
@@ -295,10 +374,11 @@ async fn connect_wasm(
         Some(parsed) => parsed,
         None => {
             log::error!("wasm webtransport: malformed welcome");
-            return;
+            return false;
         }
     };
 
+    done.set(true);
     server_tickrate.set(tickrate);
 
     let datagrams: WebTransportDatagramDuplexStream = transport.datagrams();
@@ -306,7 +386,7 @@ async fn connect_wasm(
         Ok(writer) => writer,
         Err(e) => {
             log::error!("wasm webtransport: datagram get_writer failed: {e:?}");
-            return;
+            return false;
         }
     };
 
@@ -319,8 +399,10 @@ async fn connect_wasm(
     });
 
     mailbox.borrow_mut().push_back(Inbound::Connected(id));
-    spawn_local(reliable_reader_wasm(recv_reader, buf, mailbox.clone()));
+    spawn_local(reliable_reader_wasm(recv_reader, buf, mailbox.clone(), dead));
     spawn_local(datagram_reader_wasm(dgram_reader, mailbox));
+
+    true
 }
 
 /// Browser client connection to a [`WebTransportServer`](crate::WebTransportServer),
@@ -333,6 +415,9 @@ pub struct WasmWebTransportClient {
     writers: Rc<RefCell<Option<Writers>>>,
     outbound_reliable: Vec<Vec<u8>>,
     outbound_unreliable: Vec<Vec<u8>>,
+    reliable_queue: SendQueue,
+    pump_running: Rc<Cell<bool>>,
+    dead: Dead,
     queue: InboundQueue<Vec<u8>>,
     id: Option<ClientId>,
     connected: bool,
@@ -359,20 +444,28 @@ impl WasmWebTransportClient {
         let mailbox: Mailbox = Rc::new(RefCell::new(VecDeque::new()));
         let writers: Rc<RefCell<Option<Writers>>> = Rc::new(RefCell::new(None));
         let server_tickrate: Rc<Cell<f64>> = Rc::new(Cell::new(0.0));
+        let dead: Dead = Rc::new(Cell::new(false));
 
-        spawn_local(connect_wasm(
-            transport,
-            config.protocol_id,
-            mailbox.clone(),
-            writers.clone(),
-            server_tickrate.clone(),
-        ));
+        spawn_local({
+            let (mailbox, writers): (Mailbox, Rc<RefCell<Option<Writers>>>) = (mailbox.clone(), writers.clone());
+            let (server_tickrate, dead): (Rc<Cell<f64>>, Dead) = (server_tickrate.clone(), dead.clone());
+            let protocol_id: u64 = config.protocol_id;
+
+            async move {
+                if !connect_wasm(transport, protocol_id, mailbox, writers, server_tickrate, dead.clone()).await {
+                    dead.set(true);
+                }
+            }
+        });
 
         Ok(Self {
             mailbox,
             writers,
             outbound_reliable: Vec::new(),
             outbound_unreliable: Vec::new(),
+            reliable_queue: Rc::new(RefCell::new(VecDeque::new())),
+            pump_running: Rc::new(Cell::new(false)),
+            dead,
             queue: InboundQueue::new(),
             id: None,
             connected: false,
@@ -411,7 +504,7 @@ impl NetworkManager for WasmWebTransportClient {
     }
 
     fn is_connected(&self) -> bool {
-        self.connected
+        self.connected && !self.dead.get()
     }
 
     fn server_tickrate(&self) -> Option<f64> {
@@ -422,7 +515,7 @@ impl NetworkManager for WasmWebTransportClient {
     fn update(&mut self) {
         self.queue.reset();
 
-        let mut mailbox: std::cell::RefMut<'_, VecDeque<Inbound<Vec<u8>>>> = self.mailbox.borrow_mut();
+        let mut mailbox: RefMut<'_, VecDeque<Inbound<Vec<u8>>>> = self.mailbox.borrow_mut();
         while let Some(item) = mailbox.pop_front() {
             match &item {
                 Inbound::Connected(id) => {
@@ -437,28 +530,63 @@ impl NetworkManager for WasmWebTransportClient {
         }
     }
 
+    /// Hands this tick's queued traffic to the browser.
+    ///
+    /// Reliable frames go onto the shared queue that a single [`reliable_pump`]
+    /// drains, which is what preserves their order across ticks. Datagrams are
+    /// framed synchronously (so `send_seq` advances in tick order) and written
+    /// by a per-flush task — they are unreliable and newest-wins, so a reorder
+    /// between them is within contract.
+    ///
+    /// Before the handshake completes there is nothing to write to: reliable
+    /// messages keep buffering (they are guaranteed delivery, so dropping them
+    /// would break the contract), while unreliable ones are dropped — they are
+    /// droppable by definition, and flushing a tick-old backlog of superseded
+    /// snapshots the moment the connection opens would be worse than useless.
+    ///
+    /// Once the connection is [`Dead`] everything is dropped instead: there is
+    /// no peer left to deliver to, and buffering for one would grow without
+    /// bound.
     fn flush(&mut self) {
-        if self.outbound_reliable.is_empty() && self.outbound_unreliable.is_empty() {
+        if self.dead.get() {
+            self.outbound_reliable.clear();
+            self.outbound_unreliable.clear();
             return;
         }
 
         let writers: Option<Writers> = self.writers.borrow().clone();
         let Some(writers) = writers else {
+            self.outbound_unreliable.clear();
             return;
         };
 
-        let reliable: Vec<Vec<u8>> = std::mem::take(&mut self.outbound_reliable);
-        let unreliable_raw: Vec<Vec<u8>> = std::mem::take(&mut self.outbound_unreliable);
+        if !self.outbound_unreliable.is_empty() {
+            let unreliable: Vec<Vec<u8>> = mem::take(&mut self.outbound_unreliable);
+            let max_datagram: u32 = writers.datagrams.max_datagram_size();
 
-        let max_datagram: u32 = writers.datagrams.max_datagram_size();
-        let mut framed_fragments: Vec<Vec<u8>> = Vec::new();
-        let mut scratch: Vec<u8> = Vec::new();
-        for payload in &unreliable_raw {
-            frame_unreliable(max_datagram, &mut scratch, &mut self.send_seq, payload, &mut framed_fragments);
+            let mut framed_fragments: Vec<Vec<u8>> = Vec::new();
+            for payload in &unreliable {
+                frame_unreliable(max_datagram, &mut self.send_seq, payload, &mut framed_fragments);
+            }
+
+            let datagram_writer: WritableStreamDefaultWriter = writers.datagram_writer.clone();
+            spawn_local(async move {
+                for framed in framed_fragments {
+                    let chunk: Uint8Array = Uint8Array::from(framed.as_slice());
+                    if let Err(e) = JsFuture::from(datagram_writer.write_with_chunk(&JsValue::from(chunk))).await {
+                        log::warn!("wasm webtransport: datagram write failed: {e:?}");
+                    }
+                }
+            });
         }
 
-        spawn_local(async move {
-            for payload in reliable {
+        if self.outbound_reliable.is_empty() {
+            return;
+        }
+
+        {
+            let mut queue: RefMut<'_, VecDeque<Vec<u8>>> = self.reliable_queue.borrow_mut();
+            for payload in self.outbound_reliable.drain(..) {
                 if payload.len() > MAX_FRAME_LEN {
                     log::error!(
                         "Dropping a {}-byte reliable message over the {MAX_FRAME_LEN}-byte frame limit.",
@@ -468,18 +596,19 @@ impl NetworkManager for WasmWebTransportClient {
                     continue;
                 }
 
-                if write_frame_wasm(&writers.reliable, &payload).await.is_err() {
-                    break;
-                }
+                queue.push_back(payload);
             }
+        }
 
-            for framed in framed_fragments {
-                let chunk: Uint8Array = Uint8Array::from(framed.as_slice());
-                if let Err(e) = JsFuture::from(writers.datagram_writer.write_with_chunk(&JsValue::from(chunk))).await {
-                    log::warn!("wasm webtransport: datagram write failed: {e:?}");
-                }
-            }
-        });
+        if !self.pump_running.get() {
+            self.pump_running.set(true);
+            spawn_local(reliable_pump(
+                writers.reliable.clone(),
+                self.reliable_queue.clone(),
+                self.pump_running.clone(),
+                self.dead.clone(),
+            ));
+        }
     }
 }
 

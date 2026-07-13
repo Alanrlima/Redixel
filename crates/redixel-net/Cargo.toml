@@ -35,4 +35,6 @@ web-sys = { workspace = true, features = [
     "ReadableStreamDefaultReader",
     "WritableStream",
     "WritableStreamDefaultWriter",
+    "Window",
+    "WorkerGlobalScope",
 ] }

@@ -1,10 +1,23 @@
-use std::{net::SocketAddr, path::PathBuf};
+use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
 use redixel_core::{NetworkManager, NoOpNetwork};
 
 /// Default netcode protocol id. Override per game to reject clients built
 /// against a mismatched version early.
 pub const DEFAULT_PROTOCOL_ID: u64 = 0x5245_4449_5845_4C00;
+
+/// How long a handshake may take before either side gives up on it.
+///
+/// A server reclaims the `max_clients` slot a pending handshake occupies, so a
+/// peer cannot open the cap's worth of connections, never send its hello frame,
+/// and lock every slot indefinitely.
+///
+/// A client bounds the **whole** handshake — opening the session, opening the
+/// stream, and waiting for the welcome frame — not just its last step, so an
+/// unresponsive server cannot hang it at any one of them.
+///
+/// Shared by every backend so the two ends cannot disagree on the budget.
+pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// What role this peer plays on the network.
 #[derive(Debug, Clone)]
