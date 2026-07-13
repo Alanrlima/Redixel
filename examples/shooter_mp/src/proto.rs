@@ -15,7 +15,7 @@ pub const POWERUP_SIZE: f32 = 16.0;
 
 /// A serializable 2D vector for the wire, since `redixel_math::Vec2` is not
 /// serde-aware. Convert to and from the engine vector at the boundary.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct V2 {
     pub x: f32,
     pub y: f32,
@@ -47,7 +47,7 @@ pub enum Weapon {
 /// every tick, so a dropped packet costs one tick of staleness — cheaper than
 /// the head-of-line blocking a reliable stream would impose on every input
 /// behind a retransmit.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct PlayerInput {
     pub move_dir: V2,
     pub aim: V2,
@@ -57,7 +57,7 @@ pub struct PlayerInput {
 
 /// Authoritative per-agent state broadcast to clients each snapshot. `owner`
 /// lets a client resolve the player's unique color locally via [`player_color`].
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct AgentState {
     pub owner: ClientId,
     pub pos: V2,
@@ -68,7 +68,7 @@ pub struct AgentState {
 }
 
 /// Authoritative per-bullet state for rendering.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct BulletState {
     pub pos: V2,
     pub size: f32,
@@ -76,7 +76,7 @@ pub struct BulletState {
 }
 
 /// The active powerup pickup; absent from a snapshot when none is available.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct PowerupState {
     pub pos: V2,
     pub weapon: Weapon,
@@ -94,7 +94,7 @@ pub enum EffectKind {
 }
 
 /// A positioned, pre-colored one-shot cosmetic baked into a snapshot.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Effect {
     pub kind: EffectKind,
     pub pos: V2,
@@ -111,7 +111,7 @@ pub struct Effect {
 /// `tick` is the server's fixed tick: clients drop any snapshot not strictly
 /// newer than the last one they applied, so a reordered or replayed packet can
 /// never snap the world backwards.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Snapshot {
     pub tick: u64,
     pub agents: Vec<AgentState>,
@@ -127,7 +127,7 @@ pub struct Snapshot {
 /// exactly the split `NetworkChannel` prescribes — discrete events go
 /// `ReliableOrdered`, superseded state goes `UnreliableSequenced`. Keeping them
 /// out of [`Snapshot`] also shrinks it, so it fragments less often.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EffectBatch {
     pub effects: Vec<Effect>,
 }
@@ -185,6 +185,29 @@ pub fn send_encoded<T: Serialize>(
     }
 }
 
+/// Decodes the SHA-256 certificate digest the native server logs on startup —
+/// exactly 64 lowercase hex characters, no separators — into the 32 raw bytes a
+/// browser pins via `WebTransportOptions.serverCertificateHashes`.
+///
+/// `None` for anything that is not 64 hex characters (a truncated paste, a
+/// doubled paste, or an unfilled placeholder). Returning `None` rather than
+/// panicking keeps a misconfigured build running: the caller falls back to
+/// connecting without pinning, which fails cleanly against a self-signed server
+/// instead of taking the whole game down at startup.
+pub fn parse_cert_hash_hex(hex: &str) -> Option<[u8; 32]> {
+    if hex.len() != 64 || !hex.bytes().all(|b: u8| b.is_ascii_hexdigit()) {
+        return None;
+    }
+
+    let mut hash: [u8; 32] = [0; 32];
+    for (i, byte) in hash.iter_mut().enumerate() {
+        let start: usize = i * 2;
+        *byte = u8::from_str_radix(&hex[start..start + 2], 16).ok()?;
+    }
+
+    Some(hash)
+}
+
 /// A stable, vibrant color for a connected player, derived from their
 /// [`ClientId`] so every client renders the same player the same color.
 pub fn player_color(id: ClientId) -> (u8, u8, u8) {
@@ -214,5 +237,101 @@ mod tests {
     fn overlaps_detects_and_rejects() {
         assert!(overlaps(Vec2::new(0.0, 0.0), 10.0, Vec2::new(5.0, 5.0), 10.0));
         assert!(!overlaps(Vec2::new(0.0, 0.0), 10.0, Vec2::new(20.0, 20.0), 5.0));
+    }
+
+    fn round_trip<T>(value: &T)
+    where
+        T: Serialize + for<'de> Deserialize<'de> + PartialEq + std::fmt::Debug,
+    {
+        let bytes: Vec<u8> = postcard::to_stdvec(value).expect("encodes");
+        let decoded: T = postcard::from_bytes(&bytes).expect("decodes");
+        assert_eq!(&decoded, value);
+    }
+
+    #[test]
+    fn player_input_round_trips() {
+        round_trip(&PlayerInput::default());
+        round_trip(&PlayerInput {
+            move_dir: V2 { x: -1.0, y: 0.5 },
+            aim: V2 { x: 0.0, y: -1.0 },
+            shoot: true,
+            dash: true,
+        });
+    }
+
+    #[test]
+    fn snapshot_round_trips_empty_and_populated() {
+        round_trip(&Snapshot {
+            tick: 0,
+            agents: Vec::new(),
+            bullets: Vec::new(),
+            powerup: None,
+        });
+
+        round_trip(&Snapshot {
+            tick: u64::MAX,
+            agents: vec![AgentState {
+                owner: 7,
+                pos: V2 { x: 100.0, y: 200.0 },
+                health: -3,
+                weapon: Weapon::Homing,
+                rapid_fire: true,
+                dashing: false,
+            }],
+            bullets: vec![BulletState {
+                pos: V2 { x: 1.5, y: 2.5 },
+                size: BULLET_SIZE,
+                weapon: Weapon::Shotgun,
+            }],
+            powerup: Some(PowerupState {
+                pos: V2 { x: 640.0, y: 360.0 },
+                weapon: Weapon::Flamethrower,
+            }),
+        });
+    }
+
+    #[test]
+    fn effect_batch_round_trips() {
+        round_trip(&EffectBatch { effects: Vec::new() });
+        round_trip(&EffectBatch {
+            effects: vec![
+                Effect {
+                    kind: EffectKind::Death,
+                    pos: V2 { x: 10.0, y: 20.0 },
+                    color: (255, 0, 128),
+                },
+                Effect {
+                    kind: EffectKind::BulletImpact,
+                    pos: V2 { x: -5.0, y: 0.0 },
+                    color: (0, 0, 0),
+                },
+            ],
+        });
+    }
+
+    #[test]
+    fn parse_cert_hash_hex_decodes_a_full_digest() {
+        let hex: String = "ab".repeat(32);
+        assert_eq!(parse_cert_hash_hex(&hex), Some([0xAB; 32]));
+
+        let mixed: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let hash: [u8; 32] = parse_cert_hash_hex(mixed).expect("64 hex chars decode");
+        assert_eq!(hash[0], 0x01, "the first hex pair must land in the first byte");
+        assert_eq!(hash[31], 0xEF, "the last hex pair must land in the last byte");
+    }
+
+    #[test]
+    fn parse_cert_hash_hex_rejects_anything_but_64_hex_chars() {
+        assert_eq!(parse_cert_hash_hex(""), None, "an empty hash is not a hash");
+        assert_eq!(parse_cert_hash_hex(&"ab".repeat(31)), None, "62 chars: truncated paste");
+        assert_eq!(parse_cert_hash_hex(&"a".repeat(63)), None, "63 chars: one short");
+        assert_eq!(parse_cert_hash_hex(&"a".repeat(65)), None, "65 chars: one long");
+        assert_eq!(parse_cert_hash_hex(&"ab".repeat(64)), None, "128 chars: doubled paste");
+        assert_eq!(parse_cert_hash_hex(&"g".repeat(64)), None, "'g' is not a hex digit");
+        assert_eq!(
+            parse_cert_hash_hex("GENERATED_CERT_HASH"),
+            None,
+            "the unfilled placeholder must not take the game down"
+        );
     }
 }

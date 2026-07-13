@@ -77,7 +77,7 @@ mod android {
 
     use winit::platform::android::activity::{AndroidApp, WindowManagerFlags};
 
-    use redixel::prelude::NetConfig;
+    use redixel::prelude::{NetConfig, RuntimeConfig};
 
     use crate::{SERVER_ADDR, client::Client};
 
@@ -90,7 +90,7 @@ mod android {
         );
 
         let connect: SocketAddr = SERVER_ADDR.parse().expect("SERVER_ADDR must be a valid `ip:port`");
-        let config = redixel::build_config().with_net(NetConfig::client(connect));
+        let config: RuntimeConfig = redixel::build_config().with_net(NetConfig::client(connect));
 
         app.set_window_flags(WindowManagerFlags::KEEP_SCREEN_ON, WindowManagerFlags::empty());
         if let Err(e) = redixel::run_android_with(Client::new(), app, config) {
@@ -103,14 +103,14 @@ mod android {
 mod ios {
     use std::net::SocketAddr;
 
-    use redixel::prelude::NetConfig;
+    use redixel::prelude::{NetConfig, RuntimeConfig};
 
     use crate::{SERVER_ADDR, client::Client};
 
     #[unsafe(no_mangle)]
     pub extern "C" fn ios_main() {
         let connect: SocketAddr = SERVER_ADDR.parse().expect("SERVER_ADDR must be a valid `ip:port`");
-        let config = redixel::build_config().with_net(NetConfig::client(connect));
+        let config: RuntimeConfig = redixel::build_config().with_net(NetConfig::client(connect));
 
         if let Err(e) = redixel::run_ios_with(Client::new(), config) {
             log::error!("Engine error: {e:?}");
@@ -124,24 +124,15 @@ mod wasm {
 
     use wasm_bindgen::prelude::*;
 
-    use redixel::prelude::{NetConfig, RedixelError};
+    use redixel::prelude::{NetConfig, RedixelError, RuntimeConfig};
 
-    use crate::{SERVER_ADDR, client::Client};
+    use crate::{SERVER_ADDR, client::Client, proto::parse_cert_hash_hex};
 
     /// SHA-256 hash (64 lowercase hex chars, no separators) of the server's
     /// self-signed certificate, logged by the native server on startup —
     /// paste it here to let the browser trust a self-signed/LAN server.
     /// Leave empty when connecting to a CA-trusted `server_name` deployment.
     const SERVER_CERT_HASH_HEX: &str = "GENERATED_CERT_HASH";
-
-    fn parse_cert_hash_hex(hex: &str) -> [u8; 32] {
-        let mut hash: [u8; 32] = [0; 32];
-        for (i, byte) in hash.iter_mut().enumerate() {
-            let start: usize = i * 2;
-            *byte = u8::from_str_radix(&hex[start..start + 2], 16).expect("SERVER_CERT_HASH_HEX must be 64 hex chars");
-        }
-        hash
-    }
 
     #[wasm_bindgen(start)]
     pub fn wasm_main() -> Result<(), RedixelError> {
@@ -152,10 +143,17 @@ mod wasm {
 
         let mut net_config: NetConfig = NetConfig::client(connect);
         if !SERVER_CERT_HASH_HEX.is_empty() {
-            net_config = net_config.with_server_cert_hash(parse_cert_hash_hex(SERVER_CERT_HASH_HEX));
+            match parse_cert_hash_hex(SERVER_CERT_HASH_HEX) {
+                Some(hash) => net_config = net_config.with_server_cert_hash(hash),
+                None => {
+                    log::error!(
+                        "SERVER_CERT_HASH_HEX is not 64 hex characters; connecting without certificate pinning."
+                    )
+                }
+            }
         }
 
-        let config = redixel::build_config().with_net(net_config);
+        let config: RuntimeConfig = redixel::build_config().with_net(net_config);
         redixel::run_wasm_with(Client::new(), config)
     }
 }
