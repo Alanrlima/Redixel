@@ -60,7 +60,6 @@ jobs:
         uses: ./.github/actions/cargo-each
         with:
           subcommand: clippy
-          root-flag: '--workspace --exclude fps-bench --exclude builder'
           args: '-- -D warnings'
 
       - name: Lint Networking Crates (net feature)
@@ -76,7 +75,6 @@ jobs:
         uses: ./.github/actions/cargo-each
         with:
           subcommand: test
-          root-flag: '--workspace --exclude fps-bench --exclude builder'
           args: '--verbose'
           xvfb: 'true'
         env:
@@ -99,7 +97,6 @@ jobs:
         uses: ./.github/actions/cargo-each
         with:
           subcommand: build
-          root-flag: '--workspace --exclude fps-bench --exclude builder'
           args: '--verbose'
 
       - name: Run Tests (Windows)
@@ -107,7 +104,6 @@ jobs:
         uses: ./.github/actions/cargo-each
         with:
           subcommand: test
-          root-flag: '--workspace --exclude fps-bench --exclude builder'
           args: '--verbose'
 
       - name: Test Networking Crates (net feature, Windows)
@@ -124,7 +120,6 @@ jobs:
         uses: ./.github/actions/cargo-each
         with:
           subcommand: build
-          root-flag: '--workspace --exclude fps-bench --exclude builder'
           args: '--verbose'
 
       - name: Run Tests (macOS)
@@ -132,7 +127,6 @@ jobs:
         uses: ./.github/actions/cargo-each
         with:
           subcommand: test
-          root-flag: '--workspace --exclude fps-bench --exclude builder'
           args: '--verbose'
 
       - name: Test Networking Crates (net feature, macOS)
@@ -149,7 +143,6 @@ jobs:
         uses: ./.github/actions/cargo-each
         with:
           subcommand: build
-          root-flag: '--workspace --exclude fps-bench --exclude builder'
           args: '--verbose'
 
   wasm:
@@ -173,7 +166,6 @@ jobs:
         uses: ./.github/actions/cargo-each
         with:
           subcommand: clippy
-          root-flag: '--workspace --exclude fps-bench --exclude builder'
           target: wasm32-unknown-unknown
           args: '-- -D warnings'
 
@@ -181,7 +173,6 @@ jobs:
         uses: ./.github/actions/cargo-each
         with:
           subcommand: build
-          root-flag: '--workspace --exclude fps-bench --exclude builder'
           target: wasm32-unknown-unknown
           args: '--verbose'
 
@@ -265,6 +256,7 @@ jobs:
     name: FPS Benchmark
     needs: format
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       issues: write
       pull-requests: write
