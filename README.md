@@ -10,13 +10,13 @@ The primary goal of this project is to build a clean, modular, and scalable engi
 
 Redixel is built on top of the modern Rust ecosystem, prioritizing safety and cross-platform compatibility (Desktop, Web, Android & iOS).
 
-| Component        | Technology  | Description                                                            |
-| :--------------- | :---------- | :--------------------------------------------------------------------- |
-| **Language**     | Rust (2024) | Memory safety and performance without garbage collection.              |
-| **Windowing**    | Winit       | Event loop management and low-level platform abstraction.              |
-| **Graphics**     | WGPU        | Portable graphics API targeting Vulkan, Metal, DX12, and WebGL/WebGPU. |
+| Component        | Technology                  | Description                                                                                  |
+| :--------------- | :-------------------------- | :------------------------------------------------------------------------------------------- |
+| **Language**     | Rust (2024)                 | Memory safety and performance without garbage collection.                                    |
+| **Windowing**    | Winit                       | Event loop management and low-level platform abstraction.                                    |
+| **Graphics**     | WGPU                        | Portable graphics API targeting Vulkan, Metal, DX12, and WebGL/WebGPU.                       |
 | **Networking**   | WebTransport (`wtransport`) | QUIC/HTTP-3 transport unifying reliable and unreliable delivery on one encrypted connection. |
-| **Build System** | Cargo       | Standard Rust package manager and build tool.                          |
+| **Build System** | Cargo                       | Standard Rust package manager and build tool.                                                |
 
 ## Getting Started
 
@@ -63,7 +63,7 @@ Redixel uses a pure-Rust pipeline for WebAssembly, requiring no manual HTML or J
 
 2.  **Run the example:**
     ```sh
-    cargo run --manifest-path examples/shooter/Cargo.toml --target wasm32-unknown-unknown
+    cargo run --release --manifest-path examples/shooter/Cargo.toml --target wasm32-unknown-unknown
     ```
 
 > This will automatically compile, generate bindings and start a local server at `http://127.0.0.1:1334`.
