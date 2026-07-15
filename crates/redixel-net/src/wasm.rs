@@ -227,10 +227,9 @@ async fn datagram_reader_wasm(reader: ReadableStreamDefaultReader, mailbox: Mail
 
 /// Fragments `payload` into already-framed datagrams sized to `max_datagram`,
 /// appending each to `out` — the synchronous half of native's `send_unreliable`.
-/// Browser datagram writes are async
-/// (`WritableStreamDefaultWriter::write_with_chunk`), so wasm splits framing
-/// (here, synchronous) from the actual write (`flush`'s spawned task) — native
-/// doesn't need this split since `send_datagram` is itself synchronous.
+/// [`flush`](WasmWebTransportClient::flush) then hands each framed fragment to
+/// the browser with a synchronous `write_with_chunk` call, so the split exists
+/// only to advance `send_seq` in tick order before any write is issued.
 ///
 /// The chunking itself comes from [`seq::plan`]/[`seq::fragments`], shared with
 /// native, so the two backends cannot drift apart on the wire format.
@@ -317,6 +316,13 @@ async fn handshake_watchdog(transport: WebTransport, done: Rc<Cell<bool>>) {
 /// mark it [`Dead`] — a client that fails here stays permanently unconnected,
 /// matching native's fail-soft behavior.
 ///
+/// Both datagram queues get a max age of one server tick (from the welcome's
+/// tickrate, which [`parse_welcome`] guarantees is finite and positive): every
+/// datagram on this transport is newest-wins state superseded each tick
+/// (inputs up, snapshots down), so the browser expiring a queued one instead
+/// of delivering it late mirrors native quinn, whose send path never sits on
+/// a paced queue long enough to go stale.
+///
 /// The whole handshake runs under a [`handshake_watchdog`], so it cannot hang
 /// indefinitely on an unresponsive server.
 async fn connect_wasm(
@@ -382,6 +388,9 @@ async fn connect_wasm(
     server_tickrate.set(tickrate);
 
     let datagrams: WebTransportDatagramDuplexStream = transport.datagrams();
+    let tick_ms: f64 = 1000.0 / tickrate;
+    datagrams.set_outgoing_max_age(tick_ms);
+    datagrams.set_incoming_max_age(tick_ms);
     let dgram_writer: WritableStreamDefaultWriter = match datagrams.writable().get_writer() {
         Ok(writer) => writer,
         Err(e) => {
@@ -534,9 +543,14 @@ impl NetworkManager for WasmWebTransportClient {
     ///
     /// Reliable frames go onto the shared queue that a single [`reliable_pump`]
     /// drains, which is what preserves their order across ticks. Datagrams are
-    /// framed synchronously (so `send_seq` advances in tick order) and written
-    /// by a per-flush task — they are unreliable and newest-wins, so a reorder
-    /// between them is within contract.
+    /// framed and handed to the browser **synchronously**, right here:
+    /// `write_with_chunk` initiates the send the moment it is called, so an
+    /// input datagram leaves mid-frame exactly like native's `send_datagram`,
+    /// instead of waiting for a spawned task to run after the whole frame
+    /// callback (render included) has returned — on a tick-quantized server
+    /// that deferral shows up as a full extra tick of input latency whenever
+    /// it crosses a tick boundary. The spawned task below only awaits the
+    /// already-issued writes to log failures; it never gates a send.
     ///
     /// Before the handshake completes there is nothing to write to: reliable
     /// messages keep buffering (they are guaranteed delivery, so dropping them
@@ -569,11 +583,15 @@ impl NetworkManager for WasmWebTransportClient {
                 frame_unreliable(max_datagram, &mut self.send_seq, payload, &mut framed_fragments);
             }
 
-            let datagram_writer: WritableStreamDefaultWriter = writers.datagram_writer.clone();
+            let mut pending: Vec<Promise> = Vec::with_capacity(framed_fragments.len());
+            for framed in &framed_fragments {
+                let chunk: Uint8Array = Uint8Array::from(framed.as_slice());
+                pending.push(writers.datagram_writer.write_with_chunk(&JsValue::from(chunk)));
+            }
+
             spawn_local(async move {
-                for framed in framed_fragments {
-                    let chunk: Uint8Array = Uint8Array::from(framed.as_slice());
-                    if let Err(e) = JsFuture::from(datagram_writer.write_with_chunk(&JsValue::from(chunk))).await {
+                for promise in pending {
+                    if let Err(e) = JsFuture::from(promise).await {
                         log::warn!("wasm webtransport: datagram write failed: {e:?}");
                     }
                 }
