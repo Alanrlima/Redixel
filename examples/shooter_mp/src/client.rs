@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use redixel::prelude::{
     ClientId, Color, Game, GameContext, KeyCode, MouseButton, NetworkChannel, NetworkEvent, SERVER_ID, Vec2,
@@ -8,7 +8,8 @@ use crate::{
     effects::{Effects, ParticleProps},
     proto::{
         ARENA_H, ARENA_W, AgentState, BASE_COOLDOWN, ENTITY_SIZE, Effect, EffectBatch, EffectKind, POWERUP_SIZE,
-        PlayerInput, RAPID_FIRE_COOLDOWN, Snapshot, V2, player_color, recoil_for, send_encoded, weapon_color,
+        PlayerInput, RAPID_FIRE_COOLDOWN, Snapshot, V2, move_direction, player_color, recoil_for, send_encoded,
+        step_movement, weapon_color,
     },
 };
 
@@ -17,6 +18,34 @@ const AFTERIMAGE_INTERVAL: f32 = 0.05;
 
 /// How often each bullet emits a trail particle, in seconds.
 const TRAIL_INTERVAL: f32 = 0.05;
+
+/// A predicted-vs-authoritative jump further apart than this is a respawn
+/// (which relocates by hundreds of pixels), not ordinary correction (under
+/// ~30 pixels even mid-dash) — see [`Client::reconcile`]. Restarting the
+/// prediction on the spot beats sliding it across the arena.
+const SNAP_DISTANCE: f32 = 150.0;
+
+/// Predicted-vs-authoritative disagreement below this many pixels is left
+/// alone: float drift and one-tick input timing slips are invisible, and
+/// correcting them would only jitter the body. Kept a little loose (rather
+/// than pixel-tight) so ordinary jitter in when an input's tick gets applied
+/// server-side doesn't constantly re-trigger the decay in
+/// [`RECONCILE_RATE`] and leave `render_error` never quite settling at zero.
+const RECONCILE_TOLERANCE: f32 = 4.0;
+
+/// Exponential decay rate of the visual reconciliation offset, in 1/s. At 20
+/// the offset halves roughly every 35 ms — fast enough that a correction
+/// resolves within a couple of rendered frames instead of reading as
+/// lingering mush, while still gliding rather than popping.
+const RECONCILE_RATE: f32 = 20.0;
+
+/// Below this length the visual reconciliation offset snaps straight to zero
+/// instead of decaying forever.
+const RENDER_ERROR_EPSILON: f32 = 0.5;
+
+/// Upper bound on unconfirmed prediction records (two seconds at 60 Hz), so
+/// a server that stops confirming cannot grow the history without bound.
+const PREDICTION_HISTORY: usize = 120;
 
 /// The client's input action set, bound to keyboard and mouse in `on_start`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -59,11 +88,82 @@ fn effect_props(effect: &Effect, seed: f32) -> ParticleProps {
     }
 }
 
-/// A render-direct client: it samples input and renders the exact world the
-/// server sends, holding only local cosmetic state (particles, shake, timers).
+/// Where the local player was predicted to be right after the input with
+/// this `seq` was applied, kept until a snapshot confirms (or supersedes) it.
+struct PredictedTick {
+    seq: u32,
+    pos: Vec2,
+}
+
+/// Client-side prediction of the local player's **movement — and nothing
+/// else**. Each sampled input is applied to `pos`/`vel` immediately through
+/// the same [`step_movement`] the server will run for it one network flight
+/// later, so walking responds on the very tick instead of after a round trip.
+///
+/// Deliberately **not** predicted: shooting, dash impulses, knockback, and
+/// overlap pushes — their effects arrive only via the authoritative snapshot
+/// and show up here as reconciliation. Predicting the shot too would make
+/// bullets visibly spawn away from the body whenever the predicted and
+/// authoritative positions disagree; movement-only confines any momentary
+/// error to the body itself, where a few pixels pass unnoticed. Do not
+/// extend this to the shot.
+///
+/// `render_error` is the visual remainder of past corrections: on a
+/// divergence the state jumps to the authoritative base at once, while the
+/// drawn body absorbs the jump through this offset decaying to zero (see
+/// [`Client::decay_render_error`]), so a correction glides instead of
+/// popping.
+struct Prediction {
+    pos: Vec2,
+    vel: Vec2,
+    render_error: Vec2,
+    history: VecDeque<PredictedTick>,
+}
+
+impl Prediction {
+    /// A fresh prediction standing exactly on the authoritative position.
+    fn spawned_at(pos: Vec2) -> Self {
+        Self {
+            pos,
+            vel: Vec2::ZERO,
+            render_error: Vec2::ZERO,
+            history: VecDeque::new(),
+        }
+    }
+
+    /// The predicted position with the visual reconciliation offset applied,
+    /// but **no** sub-tick extrapolation — tick-aligned. This is what
+    /// `send_input`/`own_center` aim and shoot from, since input sampling
+    /// itself runs at fixed-tick cadence: extrapolating it would make the
+    /// aim point (and the body it's measured from) disagree frame to frame
+    /// for no reason, since both update together at the same cadence anyway.
+    fn render_pos(&self) -> Vec2 {
+        self.pos + self.render_error
+    }
+
+    /// [`render_pos`](Self::render_pos) extrapolated `alpha` (`[0, 1)`, see
+    /// [`GameContext::fixed_alpha`](redixel::prelude::GameContext::fixed_alpha))
+    /// of the way into the next fixed step, at the current predicted
+    /// velocity. `on_render` draws this instead of the tick-aligned
+    /// position: display refresh rarely lines up with the tickrate, so
+    /// without this the local player's own body would visibly hold still for
+    /// however many rendered frames land between two ticks — exactly the
+    /// kind of stutter that reads as "input lag" even though the state
+    /// itself already responded on the correct tick.
+    fn extrapolated_render_pos(&self, alpha: f32, tick_duration: f32) -> Vec2 {
+        self.render_pos() + self.vel * (alpha * tick_duration)
+    }
+}
+
+/// A thin client: it samples input, predicts only the local player's
+/// movement (see [`Prediction`]), and renders remote agents/bullets straight
+/// from the latest server snapshot (see [`world`](Self::world)), holding
+/// only local cosmetic state (particles, shake, timers) beyond that.
 pub struct Client {
     latest: Option<Snapshot>,
     last_tick: Option<u64>,
+    prediction: Option<Prediction>,
+    next_input_seq: u32,
     fx: Effects,
     time: f32,
     local: Option<ClientId>,
@@ -80,6 +180,8 @@ impl Client {
         Self {
             latest: None,
             last_tick: None,
+            prediction: None,
+            next_input_seq: 1,
             fx: Effects::new(),
             time: 0.0,
             local: None,
@@ -155,6 +257,8 @@ impl Client {
         }
         self.last_tick = Some(snapshot.tick);
 
+        self.reconcile(&snapshot);
+
         for agent in snapshot.agents.iter() {
             let color: (u8, u8, u8) = if agent.rapid_fire {
                 (255, 200, 50)
@@ -190,8 +294,124 @@ impl Client {
         self.latest = Some(snapshot);
     }
 
-    /// The screen-space center of the local player's body, if known.
+    /// Applies a just-sent input to the local prediction immediately — the
+    /// same [`step_movement`] the server will run for it one network flight
+    /// later — and records the resulting position under `seq` so
+    /// [`reconcile`](Self::reconcile) can compare it against the server's
+    /// echo. The impulse argument is always zero here: dash and recoil stay
+    /// server-side by design (see [`Prediction`]).
+    ///
+    /// A no-op until the first snapshot carrying the local agent installs the
+    /// prediction, since before that there is no authoritative position to
+    /// predict from.
+    fn predict_movement(&mut self, seq: u32, input: &PlayerInput, dt: f32) {
+        let Some(pred): Option<&mut Prediction> = self.prediction.as_mut() else {
+            return;
+        };
+
+        let dir: Vec2 = move_direction(input.move_dir);
+        step_movement(&mut pred.pos, &mut pred.vel, dir, Vec2::ZERO, dt);
+
+        pred.history.push_back(PredictedTick { seq, pos: pred.pos });
+        if pred.history.len() > PREDICTION_HISTORY {
+            pred.history.pop_front();
+        }
+    }
+
+    /// Checks the local player's prediction against the authoritative
+    /// position in `snapshot`, matched through the input seq the server
+    /// echoes in [`AgentState::input_seq`]. Installs the prediction on the
+    /// first snapshot that carries the local agent.
+    ///
+    /// Agreement within [`RECONCILE_TOLERANCE`] just prunes the history. A
+    /// divergence (an unpredicted impulse, a lost input) shifts the whole
+    /// predicted state — current position and every pending history entry —
+    /// onto the authoritative base, while `render_error` absorbs the shift so
+    /// the drawn body glides instead of popping. A jump beyond
+    /// [`SNAP_DISTANCE`] is a respawn and restarts the prediction on the
+    /// spot: sliding across the arena would be worse than the cut.
+    fn reconcile(&mut self, snapshot: &Snapshot) {
+        let Some(local): Option<ClientId> = self.local else {
+            return;
+        };
+
+        let Some(agent): Option<&AgentState> = snapshot.agents.iter().find(|a: &&AgentState| a.owner == local) else {
+            return;
+        };
+
+        let auth: Vec2 = agent.pos.vec();
+        let Some(pred): Option<&mut Prediction> = self.prediction.as_mut() else {
+            self.prediction = Some(Prediction::spawned_at(auth));
+            return;
+        };
+
+        while pred
+            .history
+            .front()
+            .is_some_and(|h: &PredictedTick| h.seq < agent.input_seq)
+        {
+            pred.history.pop_front();
+        }
+
+        if pred
+            .history
+            .front()
+            .is_none_or(|h: &PredictedTick| h.seq != agent.input_seq)
+        {
+            return;
+        }
+
+        let predicted: Vec2 = pred.history.pop_front().expect("front matched above").pos;
+
+        let err: Vec2 = auth - predicted;
+        if err.length_sq() <= RECONCILE_TOLERANCE * RECONCILE_TOLERANCE {
+            return;
+        }
+
+        if err.length_sq() > SNAP_DISTANCE * SNAP_DISTANCE {
+            *pred = Prediction::spawned_at(auth);
+            return;
+        }
+
+        pred.pos += err;
+        pred.render_error -= err;
+        for entry in pred.history.iter_mut() {
+            entry.pos += err;
+        }
+    }
+
+    /// Bleeds the visual reconciliation offset toward zero so a corrected
+    /// body reaches its true position within a few frames, snapping the tail
+    /// end below [`RENDER_ERROR_EPSILON`].
+    fn decay_render_error(&mut self, dt: f32) {
+        let Some(pred): Option<&mut Prediction> = self.prediction.as_mut() else {
+            return;
+        };
+
+        pred.render_error *= (-RECONCILE_RATE * dt).exp();
+        if pred.render_error.length_sq() < RENDER_ERROR_EPSILON * RENDER_ERROR_EPSILON {
+            pred.render_error = Vec2::ZERO;
+        }
+    }
+
+    /// The world to draw this frame: the latest server snapshot, unblended.
+    ///
+    /// Only the local player gets smoothing (via [`Prediction`] and its
+    /// extrapolation) — remote agents and bullets render exactly what the
+    /// server last reported, with no interpolation between ticks.
+    fn world(&self) -> Option<Snapshot> {
+        self.latest.clone()
+    }
+
+    /// The center of the local player's body **as drawn this frame**: the
+    /// predicted render position once prediction is running, else the latest
+    /// snapshot. Aim is computed from here, so the shot direction always
+    /// agrees with the body the player actually sees.
     fn own_center(&self) -> Option<Vec2> {
+        if let Some(pred) = self.prediction.as_ref() {
+            return Some(pred.render_pos() + Vec2::splat(ENTITY_SIZE / 2.0));
+        }
+
         let local: ClientId = self.local?;
         let snapshot: &Snapshot = self.latest.as_ref()?;
         snapshot
@@ -244,8 +464,12 @@ impl Client {
             move_dir += Vec2::Y;
         }
 
+        let seq: u32 = self.next_input_seq;
+        self.next_input_seq = self.next_input_seq.wrapping_add(1);
+
         let shooting: bool = ctx.input().held(Action::Shoot);
         let input: PlayerInput = PlayerInput {
+            seq,
             move_dir: V2::of(move_dir),
             aim: V2::of(self.aim_direction(ctx, scale, offset)),
             shoot: shooting,
@@ -272,6 +496,8 @@ impl Client {
             &input,
             "input",
         );
+
+        self.predict_movement(seq, &input, ctx.fixed_delta() as f32);
     }
 
     /// Draws the arena grid in arena space through `to_screen`, with a fractional
@@ -405,8 +631,8 @@ impl Game for Client {
         if self.afterimage_clock <= 0.0 {
             self.afterimage_clock = AFTERIMAGE_INTERVAL;
 
-            if let Some(snapshot) = self.latest.as_ref() {
-                for agent in snapshot.agents.iter() {
+            if let Some(world) = self.world() {
+                for agent in world.agents.iter() {
                     if agent.dashing {
                         let color: (u8, u8, u8) = if agent.rapid_fire {
                             (255, 200, 50)
@@ -426,13 +652,14 @@ impl Game for Client {
         let dt: f32 = ctx.delta_time() as f32;
         self.time = (self.time + dt) % 3600.0;
         self.trail_clock -= dt;
+        self.decay_render_error(dt);
         self.fx.update(dt);
 
         if self.trail_clock <= 0.0 {
             self.trail_clock = TRAIL_INTERVAL;
 
-            if let Some(snapshot) = self.latest.as_ref() {
-                for bullet in snapshot.bullets.iter() {
+            if let Some(world) = self.world() {
+                for bullet in world.bullets.iter() {
                     let (r, g, b_c): (u8, u8, u8) = weapon_color(bullet.weapon);
                     self.fx.spawn_burst(ParticleProps {
                         pos: bullet.pos.vec() + Vec2::splat(bullet.size / 2.0),
@@ -459,12 +686,29 @@ impl Game for Client {
         let shake: Vec2 = self.fx.shake_offset(self.time);
         let to_screen = move |p: Vec2| -> Vec2 { offset + (p + shake) * scale };
 
+        let tick_duration: f32 = ctx.fixed_delta() as f32;
+        let alpha: f32 = ctx.fixed_alpha() as f32;
+        let mut world: Option<Snapshot> = self.world();
+
+        if let Some(world) = world.as_mut()
+            && let Some(pred) = self.prediction.as_ref()
+            && let Some(id) = self.local
+            && let Some(agent) = world.agents.iter_mut().find(|a: &&mut AgentState| a.owner == id)
+        {
+            agent.pos = V2::of(pred.extrapolated_render_pos(alpha, tick_duration));
+        }
+
         let parallax: Vec2 = self
-            .local_agent()
-            .map(|a: AgentState| -> Vec2 {
-                let p: Vec2 = a.pos.vec();
-                Vec2::new(p.x * -0.05, p.y * -0.05)
+            .local
+            .and_then(|id: ClientId| -> Option<Vec2> {
+                world
+                    .as_ref()?
+                    .agents
+                    .iter()
+                    .find(|a: &&AgentState| a.owner == id)
+                    .map(|a: &AgentState| -> Vec2 { a.pos.vec() })
             })
+            .map(|p: Vec2| -> Vec2 { Vec2::new(p.x * -0.05, p.y * -0.05) })
             .unwrap_or(Vec2::ZERO);
 
         ctx.clear_color(Color::rgb(0.08, 0.08, 0.11));
@@ -475,7 +719,7 @@ impl Game for Client {
         );
         self.draw_grid(ctx, to_screen, scale, parallax);
 
-        let snapshot: &Snapshot = match self.latest.as_ref() {
+        let snapshot: &Snapshot = match world.as_ref() {
             Some(s) => s,
             None => {
                 let pulse: f32 = (self.time * 3.0).sin().abs() * 0.5 + 0.5;
@@ -515,5 +759,295 @@ impl Game for Client {
             ctx.draw_rect(cross - Vec2::new(2.0, 12.0), Vec2::new(4.0, 24.0), Color::WHITE);
             ctx.draw_rect(cross - Vec2::new(12.0, 2.0), Vec2::new(24.0, 4.0), Color::WHITE);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::proto::{BulletState, Weapon};
+
+    const TICK: f32 = 1.0 / 60.0;
+
+    fn snap(tick: u64, agent_x: f32, bullets: Vec<BulletState>) -> Snapshot {
+        Snapshot {
+            tick,
+            agents: vec![AgentState {
+                owner: 1,
+                pos: V2 { x: agent_x, y: 0.0 },
+                input_seq: 0,
+                health: 100,
+                weapon: Weapon::Pistol,
+                rapid_fire: false,
+                dashing: false,
+            }],
+            bullets,
+            powerup: None,
+        }
+    }
+
+    #[test]
+    fn world_is_none_before_the_first_snapshot() {
+        let client: Client = Client::new();
+        assert_eq!(client.world(), None);
+    }
+
+    #[test]
+    fn world_returns_the_latest_snapshot_unblended() {
+        let mut client: Client = Client::new();
+        client.latest = Some(snap(1, 40.0, Vec::new()));
+        let world: Snapshot = client.world().expect("a snapshot was set");
+        assert_eq!(world.agents[0].pos.x, 40.0);
+    }
+
+    fn right_input(seq: u32) -> PlayerInput {
+        PlayerInput {
+            seq,
+            move_dir: V2 { x: 1.0, y: 0.0 },
+            aim: V2 { x: 0.0, y: 0.0 },
+            shoot: false,
+            dash: false,
+        }
+    }
+
+    fn predicting_client(pos: Vec2) -> Client {
+        let mut client: Client = Client::new();
+        client.local = Some(1);
+        client.prediction = Some(Prediction::spawned_at(pos));
+        client
+    }
+
+    fn confirming(input_seq: u32, pos: Vec2) -> Snapshot {
+        let mut snapshot: Snapshot = snap(1, 0.0, Vec::new());
+        snapshot.agents[0].pos = V2::of(pos);
+        snapshot.agents[0].input_seq = input_seq;
+        snapshot
+    }
+
+    #[test]
+    fn prediction_advances_immediately_without_a_server_reply() {
+        let start: Vec2 = Vec2::new(100.0, 100.0);
+        let mut client: Client = predicting_client(start);
+
+        let mut expected_pos: Vec2 = start;
+        let mut expected_vel: Vec2 = Vec2::ZERO;
+        for seq in 1..=5u32 {
+            client.predict_movement(seq, &right_input(seq), TICK);
+            let dir: Vec2 = move_direction(right_input(seq).move_dir);
+            step_movement(&mut expected_pos, &mut expected_vel, dir, Vec2::ZERO, TICK);
+        }
+
+        let pred: &Prediction = client.prediction.as_ref().expect("prediction installed");
+        assert!(
+            pred.pos.x > start.x,
+            "moving right must show on the very tick, not after a round trip"
+        );
+        assert_eq!(pred.pos.x, expected_pos.x, "prediction must run the shared integrator verbatim");
+        assert_eq!(pred.pos.y, expected_pos.y);
+        assert_eq!(pred.history.len(), 5);
+        assert_eq!(pred.history.front().expect("has entries").seq, 1);
+    }
+
+    #[test]
+    fn reconcile_installs_the_prediction_from_the_first_snapshot() {
+        let mut client: Client = Client::new();
+        client.local = Some(1);
+
+        client.reconcile(&confirming(0, Vec2::new(40.0, 25.0)));
+
+        let pred: &Prediction = client
+            .prediction
+            .as_ref()
+            .expect("first snapshot installs the prediction");
+        assert_eq!(pred.pos.x, 40.0);
+        assert_eq!(pred.pos.y, 25.0);
+    }
+
+    #[test]
+    fn reconcile_leaves_an_exact_prediction_untouched_and_prunes_history() {
+        let mut client: Client = predicting_client(Vec2::new(100.0, 100.0));
+        for seq in 1..=3u32 {
+            client.predict_movement(seq, &right_input(seq), TICK);
+        }
+
+        let (confirmed_pos, pos_before): (Vec2, Vec2) = {
+            let pred: &Prediction = client.prediction.as_ref().expect("prediction installed");
+            (pred.history[1].pos, pred.pos)
+        };
+
+        client.reconcile(&confirming(2, confirmed_pos));
+
+        let pred: &Prediction = client.prediction.as_ref().expect("prediction installed");
+        assert_eq!(pred.pos.x, pos_before.x, "an exact match must not move the prediction");
+        assert_eq!(pred.render_error.x, 0.0);
+        assert_eq!(pred.render_error.y, 0.0);
+        assert_eq!(pred.history.len(), 1, "everything up to the confirmed seq must be pruned");
+        assert_eq!(pred.history[0].seq, 3);
+    }
+
+    #[test]
+    fn reconcile_absorbs_a_divergence_without_a_visual_pop() {
+        let mut client: Client = predicting_client(Vec2::new(100.0, 100.0));
+        for seq in 1..=3u32 {
+            client.predict_movement(seq, &right_input(seq), TICK);
+        }
+
+        let (predicted_at_1, pending_at_3, drawn_before): (Vec2, Vec2, Vec2) = {
+            let pred: &Prediction = client.prediction.as_ref().expect("prediction installed");
+            (pred.history[0].pos, pred.history[2].pos, pred.render_pos())
+        };
+
+        let auth: Vec2 = predicted_at_1 + Vec2::new(30.0, 0.0);
+        client.reconcile(&confirming(1, auth));
+
+        let pred: &Prediction = client.prediction.as_ref().expect("prediction installed");
+        assert!(
+            (pred.pos.x - (drawn_before.x + 30.0)).abs() < 1e-3,
+            "the state must adopt the authoritative base at once"
+        );
+        assert!(
+            (pred.render_pos().x - drawn_before.x).abs() < 1e-3,
+            "the drawn body must not pop to the raw server value"
+        );
+        assert!(
+            (pred.history[1].pos.x - (pending_at_3.x + 30.0)).abs() < 1e-3,
+            "pending history must shift with the base or the same error re-reports every snapshot"
+        );
+    }
+
+    #[test]
+    fn render_error_decays_to_zero_over_a_few_frames() {
+        let mut client: Client = predicting_client(Vec2::new(100.0, 100.0));
+        client.prediction.as_mut().expect("prediction installed").render_error = Vec2::new(30.0, 0.0);
+
+        client.decay_render_error(TICK);
+        let after_one: f32 = client.prediction.as_ref().expect("prediction installed").render_error.x;
+        assert!(
+            after_one > 0.0 && after_one < 30.0,
+            "one frame must shrink the offset, got {after_one}"
+        );
+
+        for _ in 0..120 {
+            client.decay_render_error(TICK);
+        }
+        let settled: Vec2 = client.prediction.as_ref().expect("prediction installed").render_error;
+        assert_eq!(settled.x, 0.0, "the offset must snap to exactly zero, not decay forever");
+        assert_eq!(settled.y, 0.0);
+    }
+
+    #[test]
+    fn reconcile_snaps_a_respawn_instead_of_sliding() {
+        let mut client: Client = predicting_client(Vec2::new(100.0, 100.0));
+        for seq in 1..=2u32 {
+            client.predict_movement(seq, &right_input(seq), TICK);
+        }
+
+        let predicted_at_1: Vec2 = client.prediction.as_ref().expect("prediction installed").history[0].pos;
+        let auth: Vec2 = predicted_at_1 + Vec2::new(SNAP_DISTANCE * 4.0, 0.0);
+        client.reconcile(&confirming(1, auth));
+
+        let pred: &Prediction = client.prediction.as_ref().expect("prediction installed");
+        assert_eq!(pred.pos.x, auth.x, "a respawn must restart the prediction on the spot");
+        assert_eq!(pred.render_error.x, 0.0, "no visual offset may slide the body across the arena");
+        assert!(pred.history.is_empty(), "stale pre-respawn history must be discarded");
+        assert_eq!(pred.vel.x, 0.0, "a respawned agent starts at rest on the server too");
+    }
+
+    #[test]
+    fn reconcile_skips_a_confirmation_it_has_no_record_of() {
+        let mut client: Client = predicting_client(Vec2::new(100.0, 100.0));
+        client.predict_movement(8, &right_input(8), TICK);
+        let pos_before: Vec2 = client.prediction.as_ref().expect("prediction installed").pos;
+
+        client.reconcile(&confirming(5, Vec2::new(900.0, 0.0)));
+
+        let pred: &Prediction = client.prediction.as_ref().expect("prediction installed");
+        assert_eq!(
+            pred.pos.x, pos_before.x,
+            "a seq older than the history must not correct anything"
+        );
+        assert_eq!(pred.history.len(), 1, "the pending entry must survive");
+    }
+
+    #[test]
+    fn prediction_history_is_capped() {
+        let mut client: Client = predicting_client(Vec2::new(100.0, 100.0));
+        for seq in 1..=(PREDICTION_HISTORY as u32 + 20) {
+            client.predict_movement(seq, &right_input(seq), TICK);
+        }
+
+        let pred: &Prediction = client.prediction.as_ref().expect("prediction installed");
+        assert_eq!(pred.history.len(), PREDICTION_HISTORY);
+        assert_eq!(
+            pred.history.front().expect("full history").seq,
+            21,
+            "the oldest entries must be the ones dropped"
+        );
+    }
+
+    #[test]
+    fn extrapolated_render_pos_matches_tick_aligned_at_alpha_zero() {
+        let mut pred: Prediction = Prediction::spawned_at(Vec2::new(100.0, 100.0));
+        pred.vel = Vec2::new(600.0, 0.0);
+
+        assert_eq!(pred.extrapolated_render_pos(0.0, TICK), pred.render_pos());
+    }
+
+    #[test]
+    fn extrapolated_render_pos_advances_by_velocity_and_alpha() {
+        let mut pred: Prediction = Prediction::spawned_at(Vec2::new(100.0, 100.0));
+        pred.vel = Vec2::new(600.0, 0.0);
+
+        let half: Vec2 = pred.extrapolated_render_pos(0.5, TICK);
+        assert!(
+            (half.x - (pred.pos.x + 600.0 * 0.5 * TICK)).abs() < 1e-4,
+            "halfway into the tick must advance by half a tick's worth of velocity, got {}",
+            half.x
+        );
+
+        let almost_full: Vec2 = pred.extrapolated_render_pos(0.999, TICK);
+        assert!(
+            almost_full.x > half.x,
+            "extrapolation must keep advancing smoothly as alpha approaches the next tick"
+        );
+    }
+
+    #[test]
+    fn extrapolated_render_pos_stacks_on_top_of_the_reconciliation_offset() {
+        let mut pred: Prediction = Prediction::spawned_at(Vec2::new(100.0, 100.0));
+        pred.vel = Vec2::new(600.0, 0.0);
+        pred.render_error = Vec2::new(-10.0, 0.0);
+
+        let extrapolated: Vec2 = pred.extrapolated_render_pos(0.5, TICK);
+        let expected: f32 = pred.pos.x + pred.render_error.x + 600.0 * 0.5 * TICK;
+        assert!(
+            (extrapolated.x - expected).abs() < 1e-4,
+            "extrapolation must add on top of the visual reconciliation offset, not replace it"
+        );
+    }
+
+    #[test]
+    fn extrapolated_render_pos_stays_put_when_idle() {
+        let pred: Prediction = Prediction::spawned_at(Vec2::new(100.0, 100.0));
+        assert_eq!(
+            pred.extrapolated_render_pos(0.8, TICK),
+            pred.render_pos(),
+            "zero velocity, zero extrapolation"
+        );
+    }
+
+    #[test]
+    fn own_center_uses_the_tick_aligned_position_not_the_extrapolated_one() {
+        let mut client: Client = predicting_client(Vec2::new(100.0, 100.0));
+        client.prediction.as_mut().expect("prediction installed").vel = Vec2::new(600.0, 0.0);
+
+        let expected: Vec2 =
+            client.prediction.as_ref().expect("prediction installed").render_pos() + Vec2::splat(ENTITY_SIZE / 2.0);
+        assert_eq!(
+            client.own_center(),
+            Some(expected),
+            "aim must be measured from the tick-aligned body, matching what send_input predicted the shot from"
+        );
     }
 }

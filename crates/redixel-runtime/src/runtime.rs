@@ -355,6 +355,7 @@ impl<G: Game> Runtime<G> {
             StepFlow::Continue => {}
         }
 
+        state.sim.context.set_fixed_alpha(state.sim.time.interpolation_alpha());
         state.sim.game.on_update(&mut state.sim.context);
 
         if state.sim.context.should_exit() {

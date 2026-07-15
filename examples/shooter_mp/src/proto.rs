@@ -47,8 +47,15 @@ pub enum Weapon {
 /// every tick, so a dropped packet costs one tick of staleness — cheaper than
 /// the head-of-line blocking a reliable stream would impose on every input
 /// behind a retransmit.
+///
+/// `seq` counts the client's sent inputs starting at 1 (`0` is reserved for
+/// "no input applied yet"). The server echoes the last applied one back in
+/// [`AgentState::input_seq`], which is what lets a client match an
+/// authoritative position to the exact movement prediction it made for that
+/// input.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct PlayerInput {
+    pub seq: u32,
     pub move_dir: V2,
     pub aim: V2,
     pub shoot: bool,
@@ -57,10 +64,16 @@ pub struct PlayerInput {
 
 /// Authoritative per-agent state broadcast to clients each snapshot. `owner`
 /// lets a client resolve the player's unique color locally via [`player_color`].
+///
+/// `input_seq` echoes the [`PlayerInput::seq`] of the last input applied to
+/// this agent (`0` before the first ever arrived). Only the owning client
+/// reads it, to reconcile its local movement prediction; everyone else
+/// ignores it.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct AgentState {
     pub owner: ClientId,
     pub pos: V2,
+    pub input_seq: u32,
     pub health: i32,
     pub weapon: Weapon,
     pub rapid_fire: bool,
@@ -130,6 +143,56 @@ pub struct Snapshot {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EffectBatch {
     pub effects: Vec<Effect>,
+}
+
+/// The unit movement direction encoded in a [`PlayerInput::move_dir`], or
+/// zero when idle. Shared so the server and the client's prediction can never
+/// disagree on how raw input becomes a direction.
+pub fn move_direction(raw: V2) -> Vec2 {
+    let dir: Vec2 = raw.vec();
+    if dir.length_sq() > 0.0 {
+        dir.normalise()
+    } else {
+        Vec2::ZERO
+    }
+}
+
+/// Advances one tick of agent movement: velocity eases toward `dir` at
+/// [`PLAYER_SPEED`], `impulse` lands after the easing (dash and shot recoil
+/// on the server; always zero in client prediction), position integrates,
+/// and the arena walls clamp with a damped bounce.
+///
+/// This is the **one** movement integrator: the authoritative server and the
+/// local player's client-side prediction both call it, with the same `dt`
+/// (a client adopts the server's tickrate from the welcome frame), so a
+/// predicted position can only drift from the authoritative one where the
+/// server adds what prediction deliberately leaves out — impulses,
+/// knockback, overlap pushes — never from the integration itself.
+pub fn step_movement(pos: &mut Vec2, vel: &mut Vec2, dir: Vec2, impulse: Vec2, dt: f32) {
+    let target_vel: Vec2 = dir * PLAYER_SPEED;
+    *vel = vel.lerp(target_vel, dt * 15.0);
+    *vel += impulse;
+    *pos += *vel * dt;
+
+    if pos.x < 0.0 {
+        pos.x = 0.0;
+        vel.x *= -0.5;
+    }
+
+    if pos.x > ARENA_W - ENTITY_SIZE {
+        pos.x = ARENA_W - ENTITY_SIZE;
+        vel.x *= -0.5;
+    }
+
+    if pos.y < 0.0 {
+        pos.y = 0.0;
+        vel.y *= -0.5;
+    }
+
+    if pos.y > ARENA_H - ENTITY_SIZE {
+        pos.y = ARENA_H - ENTITY_SIZE;
+        vel.y *= -0.5;
+    }
 }
 
 /// Axis-aligned overlap test between two squares given top-left corners and sizes.
@@ -252,6 +315,7 @@ mod tests {
     fn player_input_round_trips() {
         round_trip(&PlayerInput::default());
         round_trip(&PlayerInput {
+            seq: u32::MAX,
             move_dir: V2 { x: -1.0, y: 0.5 },
             aim: V2 { x: 0.0, y: -1.0 },
             shoot: true,
@@ -273,6 +337,7 @@ mod tests {
             agents: vec![AgentState {
                 owner: 7,
                 pos: V2 { x: 100.0, y: 200.0 },
+                input_seq: u32::MAX,
                 health: -3,
                 weapon: Weapon::Homing,
                 rapid_fire: true,
@@ -307,6 +372,66 @@ mod tests {
                 },
             ],
         });
+    }
+
+    #[test]
+    fn move_direction_normalizes_and_stays_zero_when_idle() {
+        let diagonal: Vec2 = move_direction(V2 { x: 1.0, y: 1.0 });
+        assert!(
+            (diagonal.length_sq() - 1.0).abs() < 1e-5,
+            "a held diagonal must normalize to unit length"
+        );
+
+        let idle: Vec2 = move_direction(V2 { x: 0.0, y: 0.0 });
+        assert_eq!(idle.x, 0.0);
+        assert_eq!(idle.y, 0.0);
+    }
+
+    #[test]
+    fn step_movement_eases_toward_player_speed() {
+        let mut pos: Vec2 = Vec2::new(100.0, 100.0);
+        let mut vel: Vec2 = Vec2::ZERO;
+        let dir: Vec2 = move_direction(V2 { x: 1.0, y: 0.0 });
+
+        for _ in 0..30 {
+            step_movement(&mut pos, &mut vel, dir, Vec2::ZERO, 1.0 / 60.0);
+        }
+
+        assert!(
+            (vel.x - PLAYER_SPEED).abs() < PLAYER_SPEED * 0.01,
+            "velocity must converge on PLAYER_SPEED, got {}",
+            vel.x
+        );
+        assert!(pos.x > 100.0, "the agent must have moved right");
+        assert_eq!(vel.y, 0.0);
+    }
+
+    #[test]
+    fn step_movement_clamps_and_bounces_at_the_wall() {
+        let mut pos: Vec2 = Vec2::new(ARENA_W - ENTITY_SIZE - 1.0, 100.0);
+        let mut vel: Vec2 = Vec2::new(1000.0, 0.0);
+
+        step_movement(&mut pos, &mut vel, Vec2::ZERO, Vec2::ZERO, 1.0 / 60.0);
+
+        assert_eq!(pos.x, ARENA_W - ENTITY_SIZE, "the wall must clamp the position");
+        assert!(vel.x < 0.0, "the wall must reflect the velocity, got {}", vel.x);
+    }
+
+    #[test]
+    fn step_movement_applies_the_impulse_after_the_easing() {
+        let mut pos: Vec2 = Vec2::new(100.0, 100.0);
+        let mut vel: Vec2 = Vec2::ZERO;
+
+        step_movement(&mut pos, &mut vel, Vec2::ZERO, Vec2::new(120.0, 0.0), 1.0 / 60.0);
+
+        assert_eq!(
+            vel.x, 120.0,
+            "an impulse from rest must land whole, not be eroded by the easing"
+        );
+        assert!(
+            (pos.x - (100.0 + 120.0 / 60.0)).abs() < 1e-3,
+            "the impulse must integrate this same tick"
+        );
     }
 
     #[test]
