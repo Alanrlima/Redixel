@@ -195,6 +195,17 @@ pub fn step_movement(pos: &mut Vec2, vel: &mut Vec2, dir: Vec2, impulse: Vec2, d
     }
 }
 
+/// Returns `true` if input sequence `a` is strictly newer than `b` under
+/// serial-number arithmetic (RFC 1982).
+///
+/// The client prunes confirmed inputs by comparing [`PlayerInput::seq`]
+/// values, which count up and wrap at `u32::MAX`; a plain `<` would invert
+/// for the one comparison that straddles that wrap and skip a reconciliation.
+pub fn seq_newer(a: u32, b: u32) -> bool {
+    const HALF: u32 = u32::MAX / 2;
+    ((a > b) && (a - b <= HALF)) || ((a < b) && (b - a > HALF))
+}
+
 /// Axis-aligned overlap test between two squares given top-left corners and sizes.
 pub fn overlaps(p1: Vec2, s1: f32, p2: Vec2, s2: f32) -> bool {
     p1.x + s1 > p2.x && p1.x < p2.x + s2 && p1.y + s1 > p2.y && p1.y < p2.y + s2
@@ -294,6 +305,15 @@ mod tests {
     fn player_color_wraps_palette_and_distinguishes_neighbors() {
         assert_eq!(player_color(1), player_color(7));
         assert_ne!(player_color(1), player_color(2));
+    }
+
+    #[test]
+    fn seq_newer_orders_and_survives_wraparound() {
+        assert!(seq_newer(2, 1));
+        assert!(!seq_newer(1, 2));
+        assert!(!seq_newer(5, 5), "a seq is not newer than itself");
+        assert!(seq_newer(0, u32::MAX), "the value just past the wrap is the newer one");
+        assert!(!seq_newer(u32::MAX, 0));
     }
 
     #[test]

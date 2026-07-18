@@ -9,7 +9,7 @@ use crate::{
     proto::{
         ARENA_H, ARENA_W, AgentState, BASE_COOLDOWN, ENTITY_SIZE, Effect, EffectBatch, EffectKind, POWERUP_SIZE,
         PlayerInput, RAPID_FIRE_COOLDOWN, Snapshot, V2, move_direction, player_color, recoil_for, send_encoded,
-        step_movement, weapon_color,
+        seq_newer, step_movement, weapon_color,
     },
 };
 
@@ -348,7 +348,7 @@ impl Client {
         while pred
             .history
             .front()
-            .is_some_and(|h: &PredictedTick| h.seq < agent.input_seq)
+            .is_some_and(|h: &PredictedTick| seq_newer(agent.input_seq, h.seq))
         {
             pred.history.pop_front();
         }
