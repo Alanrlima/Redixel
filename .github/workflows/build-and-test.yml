@@ -149,8 +149,6 @@ jobs:
     name: WebAssembly (WASM)
     needs: format
     runs-on: ubuntu-latest
-    env:
-      RUSTFLAGS: --cfg=web_sys_unstable_apis
 
     steps:
       - name: Checkout Code
