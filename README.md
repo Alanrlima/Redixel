@@ -10,13 +10,13 @@ The primary goal of this project is to build a clean, modular, and scalable engi
 
 Redixel is built on top of the modern Rust ecosystem, prioritizing safety and cross-platform compatibility (Desktop, Web, Android & iOS).
 
-| Component        | Technology                  | Description                                                                                  |
-| :--------------- | :-------------------------- | :------------------------------------------------------------------------------------------- |
-| **Language**     | Rust (2024)                 | Memory safety and performance without garbage collection.                                    |
-| **Windowing**    | Winit                       | Event loop management and low-level platform abstraction.                                    |
-| **Graphics**     | WGPU                        | Portable graphics API targeting Vulkan, Metal, DX12, and WebGL/WebGPU.                       |
-| **Networking**   | WebTransport (`wtransport`) | QUIC/HTTP-3 transport unifying reliable and unreliable delivery on one encrypted connection. |
-| **Build System** | Cargo                       | Standard Rust package manager and build tool.                                                |
+| Component        | Technology                              | Description                                                                                                                                                                                                   |
+| :--------------- | :-------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Language**     | Rust (2024)                             | Memory safety and performance without garbage collection.                                                                                                                                                     |
+| **Windowing**    | Winit                                   | Event loop management and low-level platform abstraction.                                                                                                                                                     |
+| **Graphics**     | WGPU                                    | Portable graphics API targeting Vulkan, Metal, DX12, and WebGL/WebGPU.                                                                                                                                        |
+| **Networking**   | WebTransport (`wtransport` / `web-sys`) | QUIC/HTTP-3 transport unifying reliable and unreliable delivery on one encrypted connection — native via `wtransport`, browser via `web-sys`'s `WebTransport` bindings, both speaking the same wire protocol. |
+| **Build System** | Cargo                                   | Standard Rust package manager and build tool.                                                                                                                                                                 |
 
 ## Getting Started
 
@@ -209,7 +209,28 @@ cargo run --release --manifest-path examples/shooter_mp/Cargo.toml -- client [se
 
 > If clients on other machines can't connect, check that **UDP 5000** is open on the server's firewall.
 
-**Cross-play:** every native platform (Windows, Linux, macOS, Android, and iOS) shares the exact same `NetworkManager`/WebTransport implementation in `redixel-net` — there's no per-platform transport code. A headless server running on Linux, a windowed client on Windows, and a client on an Android phone all speak the identical wire protocol, so they can join the same match interchangeably.
+**Cross-play:** every platform — Windows, Linux, macOS, Android, iOS, and the browser — shares the exact same `NetworkManager`/WebTransport wire protocol; only the transport binding differs (`wtransport` natively, `web-sys` in the browser). A headless server on Linux, a windowed client on Windows, and a client running in a browser tab can all join the same match interchangeably.
+
+#### Playing from the browser
+
+The browser client needs the WASM toolchain from [Running on Web](#running-on-web-wasm) installed first. Browsers cannot simply disable certificate validation the way native/mobile clients do, so connecting to a self-signed LAN server requires **pinning its certificate hash**:
+
+1. **Start the server** and copy the hash it logs on startup:
+
+   ```bash
+   cargo run --release --manifest-path examples/shooter_mp/Cargo.toml -- server [bind_addr:port]
+   # WebTransport server certificate hash (sha-256): <64 hex characters>
+   ```
+
+2. **Paste it** into `SERVER_CERT_HASH_HEX` in `examples/shooter_mp/src/lib.rs` (the `wasm` module), replacing the `"SERVER_CERT_HASH_HEX"` placeholder. If the server binds to anything other than `127.0.0.1:5000`, also update `SERVER_ADDR` in the same file — the browser client has no argv, so the address is fixed at build time.
+
+3. **Run the client:**
+
+   ```bash
+   cargo run --release --manifest-path examples/shooter_mp/Cargo.toml --target wasm32-unknown-unknown
+   ```
+
+> Restart the server and the pinned hash goes stale — a fresh self-signed certificate is generated each run, so re-copy it and rebuild the client. Connecting to a CA-trusted `server_name` deployment needs no pinning: leave `SERVER_CERT_HASH_HEX` empty.
 
 ## Architecture
 
