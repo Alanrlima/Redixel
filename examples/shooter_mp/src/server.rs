@@ -4,8 +4,8 @@ use redixel::prelude::{ClientId, Game, GameContext, NetworkChannel, NetworkEvent
 
 use crate::proto::{
     ARENA_H, ARENA_W, AgentState, BASE_COOLDOWN, BULLET_SIZE, BULLET_SPEED, BulletState, ENTITY_SIZE, Effect,
-    EffectBatch, EffectKind, PLAYER_SPEED, POWERUP_DURATION, POWERUP_SIZE, PlayerInput, PowerupState,
-    RAPID_FIRE_COOLDOWN, Snapshot, V2, Weapon, overlaps, recoil_for, rotate_vec, send_encoded, weapon_color,
+    EffectBatch, EffectKind, POWERUP_DURATION, POWERUP_SIZE, PlayerInput, PowerupState, RAPID_FIRE_COOLDOWN, Snapshot,
+    V2, Weapon, move_direction, overlaps, recoil_for, rotate_vec, send_encoded, step_movement, weapon_color,
 };
 
 /// Seconds between a powerup being picked up and the next one appearing.
@@ -16,7 +16,9 @@ const POWERUP_RESPAWN: f32 = 10.0;
 const TIME_WRAP: f32 = 3600.0;
 
 /// An authoritative agent owned by one connected client. Holds only simulation
-/// state; cosmetics live entirely on the client.
+/// state; cosmetics live entirely on the client. `input_seq` is the
+/// [`PlayerInput::seq`] of `input`, echoed back in every snapshot so the
+/// owning client can reconcile its movement prediction.
 struct ServerAgent {
     owner: ClientId,
     pos: Vec2,
@@ -28,6 +30,7 @@ struct ServerAgent {
     dash_timer: f32,
     weapon: Weapon,
     input: PlayerInput,
+    input_seq: u32,
 }
 
 impl ServerAgent {
@@ -44,6 +47,7 @@ impl ServerAgent {
             dash_timer: 0.0,
             weapon: Weapon::Pistol,
             input: PlayerInput::default(),
+            input_seq: 0,
         }
     }
 
@@ -217,6 +221,7 @@ impl Server {
                         && let Some(agent) = self.agents.iter_mut().find(|a: &&mut ServerAgent| a.owner == id)
                     {
                         agent.input = input;
+                        agent.input_seq = input.seq;
                     }
                 }
                 NetworkEvent::Message(.., NetworkChannel::ReliableOrdered, _) => {}
@@ -259,8 +264,10 @@ impl Server {
         });
     }
 
-    /// Applies each agent's latest input, integrates motion, fires weapons, and
-    /// resolves wall bounces and powerup pickups.
+    /// Applies each agent's latest input, fires weapons, and integrates motion
+    /// (walls included) through the shared [`step_movement`] — the same
+    /// integrator the owning client runs for its prediction — then resolves
+    /// powerup pickups.
     fn step_agents(&mut self, dt: f32) {
         let agents_len: usize = self.agents.len();
         for i in 0..agents_len {
@@ -280,16 +287,11 @@ impl Server {
             }
 
             let input: PlayerInput = agent.input;
-            let mut dir: Vec2 = input.move_dir.vec();
-            if dir.length_sq() > 0.0 {
-                dir = dir.normalise();
-            }
-
-            let target_vel: Vec2 = dir * PLAYER_SPEED;
-            agent.vel = agent.vel.lerp(target_vel, dt * 15.0);
+            let dir: Vec2 = move_direction(input.move_dir);
+            let mut impulse: Vec2 = Vec2::ZERO;
 
             if input.dash && agent.dash_cooldown <= 0.0 && dir.length_sq() > 0.0 {
-                agent.vel += dir * 1500.0;
+                impulse += dir * 1500.0;
                 agent.dash_cooldown = 1.2;
                 agent.dash_timer = 0.4;
             }
@@ -302,28 +304,11 @@ impl Server {
                     agent.shoot_cooldown = agent.current_cooldown_max();
                     let recoil: f32 =
                         Self::spawn_bullets(&mut self.bullets, agent.owner, agent.weapon, center, dir_vec, self.time);
-                    agent.vel -= dir_vec * recoil;
+                    impulse -= dir_vec * recoil;
                 }
             }
 
-            agent.pos += agent.vel * dt;
-
-            if agent.pos.x < 0.0 {
-                agent.pos.x = 0.0;
-                agent.vel.x *= -0.5;
-            }
-            if agent.pos.x > ARENA_W - ENTITY_SIZE {
-                agent.pos.x = ARENA_W - ENTITY_SIZE;
-                agent.vel.x *= -0.5;
-            }
-            if agent.pos.y < 0.0 {
-                agent.pos.y = 0.0;
-                agent.vel.y *= -0.5;
-            }
-            if agent.pos.y > ARENA_H - ENTITY_SIZE {
-                agent.pos.y = ARENA_H - ENTITY_SIZE;
-                agent.vel.y *= -0.5;
-            }
+            step_movement(&mut agent.pos, &mut agent.vel, dir, impulse, dt);
 
             if self.powerup.active && overlaps(agent.pos, ENTITY_SIZE, self.powerup.pos, POWERUP_SIZE) {
                 agent.weapon = self.powerup.weapon;
@@ -493,6 +478,7 @@ impl Server {
                 AgentState {
                     owner: a.owner,
                     pos: V2::of(a.pos),
+                    input_seq: a.input_seq,
                     health: a.health,
                     weapon: a.weapon,
                     rapid_fire: a.rapid_fire_timer > 0.0,

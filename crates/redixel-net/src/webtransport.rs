@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    fmt::Write,
     io,
     net::SocketAddr,
     sync::{
@@ -22,13 +23,17 @@ use wtransport::{
     endpoint::{IncomingSession, SessionRequest, endpoint_side},
     error::StreamWriteError,
     stream::OpeningBiStream,
-    tls::error::{InvalidSan, PemLoadError},
+    tls::{
+        Certificate,
+        error::{InvalidSan, PemLoadError},
+    },
 };
 
 use redixel_core::{ClientId, NetworkChannel, NetworkEvent, NetworkManager, NoOpNetwork, SERVER_ID};
 
 use crate::{
-    config::{CertSource, NetConfig, NetMode},
+    config::{CertSource, HANDSHAKE_TIMEOUT, NetConfig, NetMode},
+    frame::parse_welcome,
     inbound::{Inbound, InboundQueue},
     seq,
 };
@@ -49,13 +54,6 @@ const WELCOME_LEN: usize = 16;
 
 /// QUIC application error code sent when a peer fails the protocol handshake.
 const PROTOCOL_MISMATCH_CODE: u32 = 1;
-
-/// How long a peer has to complete the handshake before its slot is reclaimed.
-///
-/// A pending handshake already occupies one of `max_clients`, so without this a
-/// peer could open the cap's worth of connections, never send its hello frame,
-/// and lock every slot indefinitely.
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Worker threads backing a server's transport runtime.
 ///
@@ -217,42 +215,19 @@ fn send_unreliable(conn: &Connection, scratch: &mut Vec<u8>, send_seq: &mut u32,
         return;
     };
 
-    if max_datagram <= seq::HEADER_LEN {
-        log::warn!("Datagram limit of {max_datagram} bytes cannot fit the sequence header; dropping.");
-        return;
-    }
-
-    if payload.len() > seq::MAX_MESSAGE_LEN {
-        log::warn!(
-            "Dropping a {}-byte unreliable message over the {}-byte reassembly limit.",
-            payload.len(),
-            seq::MAX_MESSAGE_LEN
-        );
-        return;
-    }
-
-    let chunk: usize = max_datagram - seq::HEADER_LEN;
-    let count: usize = payload.len().div_ceil(chunk).max(1);
-    if count > seq::MAX_FRAGMENTS as usize {
-        log::warn!(
-            "An unreliable message of {} bytes needs {count} fragments, over the {} limit; dropping.",
-            payload.len(),
-            seq::MAX_FRAGMENTS
-        );
-        return;
-    }
+    let plan: seq::Plan<'_> = match seq::Plan::new(max_datagram, payload) {
+        Ok(plan) => plan,
+        Err(e) => {
+            log::warn!("{e}");
+            return;
+        }
+    };
 
     let current: u32 = *send_seq;
     *send_seq = send_seq.wrapping_add(1);
 
-    if payload.is_empty() {
-        seq::frame(scratch, current, 0, 1, &[]);
-        conn.send_datagram(scratch.as_slice()).ok();
-        return;
-    }
-
-    for (index, fragment) in payload.chunks(chunk).enumerate() {
-        seq::frame(scratch, current, index as u16, count as u16, fragment);
+    for (index, fragment) in plan.fragments() {
+        seq::frame(scratch, current, index, plan.count(), fragment);
         if conn.send_datagram(scratch.as_slice()).is_err() {
             break;
         }
@@ -523,6 +498,7 @@ async fn handshake_server(
 pub struct WebTransportServer {
     _runtime: Runtime,
     local_addr: SocketAddr,
+    cert_hash: Option<[u8; 32]>,
     inbound_rx: UnboundedReceiver<InboundEvent>,
     outbound_tx: UnboundedSender<Outgoing>,
     queue: InboundQueue<Vec<u8>>,
@@ -566,14 +542,25 @@ impl WebTransportServer {
         let (outbound_tx, outbound_rx): (UnboundedSender<Outgoing>, UnboundedReceiver<Outgoing>) = unbounded_channel();
 
         let cert: CertSource = cert.clone();
-        let endpoint: Endpoint<endpoint_side::Server> = runtime.block_on(async move {
-            let identity: Identity = make_identity(&cert).await?;
-            let config: ServerConfig = ServerConfig::builder()
-                .with_bind_address(bind)
-                .with_identity(identity)
-                .build();
-            Endpoint::server(config)
-        })?;
+        let (endpoint, cert_hash): (Endpoint<endpoint_side::Server>, Option<[u8; 32]>) =
+            runtime.block_on(async move {
+                let identity: Identity = make_identity(&cert).await?;
+                let cert_hash: Option<[u8; 32]> = match &cert {
+                    CertSource::SelfSigned => identity
+                        .certificate_chain()
+                        .as_slice()
+                        .first()
+                        .map(|c: &Certificate| *c.hash().as_ref()),
+                    CertSource::Pem { .. } => None,
+                };
+
+                let config: ServerConfig = ServerConfig::builder()
+                    .with_bind_address(bind)
+                    .with_identity(identity)
+                    .build();
+
+                io::Result::Ok((Endpoint::server(config)?, cert_hash))
+            })?;
 
         let local_addr: SocketAddr = endpoint.local_addr()?;
         runtime.spawn(run_server(
@@ -589,6 +576,7 @@ impl WebTransportServer {
         Ok(Self {
             _runtime: runtime,
             local_addr,
+            cert_hash,
             inbound_rx,
             outbound_tx,
             queue: InboundQueue::new(),
@@ -598,6 +586,13 @@ impl WebTransportServer {
     /// The actual bound address (useful when binding to port 0).
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
+    }
+
+    /// SHA-256 digest of the server's self-signed certificate, for wasm clients
+    /// to pin via [`NetConfig::with_server_cert_hash`](crate::NetConfig::with_server_cert_hash).
+    /// `None` for [`CertSource::Pem`] (a CA-trusted cert needs no pinning).
+    pub fn cert_hash(&self) -> Option<[u8; 32]> {
+        self.cert_hash
     }
 }
 
@@ -648,22 +643,35 @@ impl NetworkManager for WebTransportServer {
     fn flush(&mut self) {}
 }
 
-/// Client event loop: connects, announces its protocol id, learns its assigned
-/// id and the server's tickrate, then dispatches outbound traffic.
-async fn run_client(
-    endpoint: Endpoint<endpoint_side::Client>,
-    url: String,
-    protocol_id: u64,
-    inbound_tx: UnboundedSender<InboundEvent>,
-    mut outbound_rx: UnboundedReceiver<Outgoing>,
+/// The readings a client's transport task publishes back to the synchronous
+/// manager: the latest round-trip time and the tickrate the server announced in
+/// its welcome frame. Both are `f64`/`Duration` values stored as raw bits, so a
+/// plain atomic load serves them to the game thread without a lock.
+#[derive(Clone)]
+struct ClientShared {
     rtt: Arc<AtomicU64>,
     server_tickrate: Arc<AtomicU64>,
-) {
-    let connection: Connection = match endpoint.connect(url.as_str()).await {
+}
+
+/// Opens the session to `url`, announces `protocol_id`, and reads back the
+/// welcome frame — the client's whole handshake, and the counterpart to the
+/// server's [`establish`]. Returns the live connection, its reliable stream, the
+/// assigned id and the server's tickrate, or `None` if any step failed.
+///
+/// Every step is awaited here rather than in [`run_client`] so that *all* of
+/// them sit inside one [`HANDSHAKE_TIMEOUT`]: a server that completes the QUIC
+/// handshake but never accepts the stream, or accepts it and then goes silent,
+/// must not be able to hang the client on any single step.
+async fn client_handshake(
+    endpoint: Endpoint<endpoint_side::Client>,
+    url: &str,
+    protocol_id: u64,
+) -> Option<(Arc<Connection>, SendStream, RecvStream, ClientId, f64)> {
+    let connection: Connection = match endpoint.connect(url).await {
         Ok(connection) => connection,
         Err(e) => {
             log::error!("webtransport connect to {url}: {e}");
-            return;
+            return None;
         }
     };
 
@@ -672,7 +680,7 @@ async fn run_client(
         Ok(opening) => opening,
         Err(e) => {
             log::error!("webtransport open_bi: {e}");
-            return;
+            return None;
         }
     };
 
@@ -680,42 +688,61 @@ async fn run_client(
         Ok(streams) => streams,
         Err(e) => {
             log::error!("webtransport open_bi finish: {e}");
-            return;
+            return None;
         }
     };
 
     if write_frame(&mut send, &protocol_id.to_le_bytes()).await.is_err() {
-        return;
+        log::error!("webtransport: failed to send hello");
+        return None;
     }
 
     let welcome: Vec<u8> = match read_frame(&mut recv).await {
         Some(frame) => frame,
         None => {
             log::error!("webtransport: server closed before the welcome frame (protocol id mismatch?)");
-            return;
+            return None;
         }
     };
 
-    let id: ClientId = match welcome.get(0..8).and_then(|b: &[u8]| b.try_into().ok()) {
-        Some(bytes) => u64::from_le_bytes(bytes),
+    let (id, tickrate): (ClientId, f64) = match parse_welcome(&welcome) {
+        Some(parsed) => parsed,
         None => {
             log::error!("webtransport: malformed welcome");
-            return;
+            return None;
         }
     };
 
-    let tickrate: f64 = match welcome.get(8..WELCOME_LEN).and_then(|b: &[u8]| b.try_into().ok()) {
-        Some(bytes) => f64::from_le_bytes(bytes),
-        None => {
-            log::error!("webtransport: welcome frame missing tickrate");
-            return;
-        }
-    };
+    Some((conn, send, recv, id, tickrate))
+}
 
-    if !tickrate.is_finite() || tickrate <= 0.0 {
-        log::error!("webtransport: server announced a non-positive tickrate of {tickrate}");
+/// Client event loop: connects, announces its protocol id, learns its assigned
+/// id and the server's tickrate, then dispatches outbound traffic.
+async fn run_client(
+    endpoint: Endpoint<endpoint_side::Client>,
+    url: String,
+    protocol_id: u64,
+    handshake_timeout: Duration,
+    inbound_tx: UnboundedSender<InboundEvent>,
+    mut outbound_rx: UnboundedReceiver<Outgoing>,
+    shared: ClientShared,
+) {
+    let ClientShared { rtt, server_tickrate }: ClientShared = shared;
+
+    let handshake: Option<(Arc<Connection>, SendStream, RecvStream, ClientId, f64)> =
+        match tokio::time::timeout(handshake_timeout, client_handshake(endpoint, &url, protocol_id)).await {
+            Ok(handshake) => handshake,
+            Err(_) => {
+                log::error!("webtransport: handshake with {url} did not complete within {handshake_timeout:?}.");
+                return;
+            }
+        };
+
+    let Some((conn, send, recv, id, tickrate)): Option<(Arc<Connection>, SendStream, RecvStream, ClientId, f64)> =
+        handshake
+    else {
         return;
-    }
+    };
 
     server_tickrate.store(tickrate.to_bits(), Ordering::Relaxed);
     inbound_tx.send(Inbound::Connected(id)).ok();
@@ -778,6 +805,18 @@ impl WebTransportClient {
     /// cert (production); otherwise `https://{ip}:{port}` with validation
     /// disabled (LAN / self-signed).
     pub fn new(connect: SocketAddr, server_name: Option<String>, protocol_id: u64) -> io::Result<Self> {
+        Self::with_handshake_timeout(connect, server_name, protocol_id, HANDSHAKE_TIMEOUT)
+    }
+
+    /// [`new`](Self::new) with an explicit handshake timeout, so tests can drive
+    /// the give-up-on-a-silent-server path in milliseconds instead of the
+    /// production 10 s.
+    fn with_handshake_timeout(
+        connect: SocketAddr,
+        server_name: Option<String>,
+        protocol_id: u64,
+        handshake_timeout: Duration,
+    ) -> io::Result<Self> {
         let runtime: Runtime = Builder::new_multi_thread()
             .worker_threads(CLIENT_WORKER_THREADS)
             .enable_all()
@@ -810,10 +849,13 @@ impl WebTransportClient {
             endpoint,
             url,
             protocol_id,
+            handshake_timeout,
             inbound_tx,
             outbound_rx,
-            rtt.clone(),
-            server_tickrate.clone(),
+            ClientShared {
+                rtt: rtt.clone(),
+                server_tickrate: server_tickrate.clone(),
+            },
         ));
 
         Ok(Self {
@@ -888,6 +930,17 @@ impl NetworkManager for WebTransportClient {
     fn flush(&mut self) {}
 }
 
+/// Hex-encodes `bytes` as a lowercase string with no separators.
+fn to_hex(bytes: &[u8]) -> String {
+    let mut out: String = String::with_capacity(bytes.len() * 2);
+
+    for byte in bytes {
+        write!(out, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+
+    out
+}
+
 /// Builds the native WebTransport [`NetworkManager`] for `config`, degrading to a
 /// [`NoOpNetwork`] (with a logged error) on failure. `tickrate` is the local
 /// authoritative rate; a server embeds it in its welcome frame, a client
@@ -898,6 +951,9 @@ pub fn build(config: &NetConfig, tickrate: f64) -> Box<dyn NetworkManager> {
             match WebTransportServer::new(*bind, &config.cert, tickrate, config.protocol_id, config.max_clients) {
                 Ok(server) => {
                     log::info!("WebTransport server listening on {bind} (max {} clients).", config.max_clients);
+                    if let Some(hash) = server.cert_hash() {
+                        log::info!("WebTransport server certificate hash (sha-256): {}", to_hex(&hash));
+                    }
                     Box::new(server)
                 }
                 Err(e) => {
@@ -926,15 +982,27 @@ pub fn build(config: &NetConfig, tickrate: f64) -> Box<dyn NetworkManager> {
 
 #[cfg(test)]
 mod tests {
-    use std::net::SocketAddr;
-    use std::thread::sleep;
-    use std::time::{Duration, Instant};
+    use std::{
+        net::SocketAddr,
+        path::PathBuf,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+        thread::sleep,
+        time::{Duration, Instant},
+    };
+
+    use wtransport::{
+        ClientConfig, Connection, Endpoint, Identity, RecvStream, SendStream, ServerConfig,
+        endpoint::{IncomingSession, endpoint_side},
+    };
 
     use redixel_core::{NetworkChannel, NetworkEvent, NetworkManager, SERVER_ID};
 
-    use crate::config::{CertSource, DEFAULT_PROTOCOL_ID};
+    use crate::config::{CertSource, DEFAULT_PROTOCOL_ID, HANDSHAKE_TIMEOUT};
 
-    use super::{HANDSHAKE_TIMEOUT, WebTransportClient, WebTransportServer};
+    use super::{WebTransportClient, WebTransportServer};
 
     const SETTLE_BUDGET: Duration = Duration::from_secs(HANDSHAKE_TIMEOUT.as_secs() * 3);
     const REJECT_BUDGET: Duration = Duration::from_secs(3);
@@ -986,6 +1054,51 @@ mod tests {
         let server: WebTransportServer = server_on_free_port(60.0);
         assert!(server.is_server());
         assert_eq!(server.local_client(), None);
+    }
+
+    #[test]
+    fn cert_hash_is_some_for_self_signed_and_none_for_pem() {
+        let bind: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let self_signed: WebTransportServer =
+            WebTransportServer::new(bind, &CertSource::SelfSigned, 60.0, DEFAULT_PROTOCOL_ID, MAX_CLIENTS)
+                .expect("server binds");
+
+        assert!(self_signed.cert_hash().is_some());
+
+        let dir: PathBuf = std::env::temp_dir();
+        let cert_path: PathBuf = dir.join("redixel-net-test-cert-hash-cert.pem");
+        let key_path: PathBuf = dir.join("redixel-net-test-cert-hash-key.pem");
+
+        let identity: Identity = Identity::self_signed(["localhost"]).expect("self-signed identity");
+        let runtime: tokio::runtime::Runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+        runtime.block_on(async {
+            identity
+                .certificate_chain()
+                .store_pemfile(&cert_path)
+                .await
+                .expect("store cert pemfile");
+            identity
+                .private_key()
+                .store_secret_pemfile(&key_path)
+                .await
+                .expect("store key pemfile");
+        });
+
+        let pem_server: WebTransportServer = WebTransportServer::new(
+            bind,
+            &CertSource::Pem {
+                cert: cert_path.clone(),
+                key: key_path.clone(),
+            },
+            60.0,
+            DEFAULT_PROTOCOL_ID,
+            MAX_CLIENTS,
+        )
+        .expect("server binds with pem cert");
+        assert!(pem_server.cert_hash().is_none());
+
+        std::fs::remove_file(&cert_path).ok();
+        std::fs::remove_file(&key_path).ok();
     }
 
     #[test]
@@ -1042,8 +1155,6 @@ mod tests {
     }
 
     fn stall_handshake(addr: SocketAddr) -> StalledPeer {
-        use wtransport::{ClientConfig, Connection, Endpoint, RecvStream, SendStream, endpoint::endpoint_side};
-
         let runtime: tokio::runtime::Runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
             .enable_all()
@@ -1110,6 +1221,87 @@ mod tests {
         assert!(connected, "the slot was never reclaimed after the stalled handshake timed out");
 
         drop(stalled);
+    }
+
+    struct MuteServer {
+        _runtime: tokio::runtime::Runtime,
+        addr: SocketAddr,
+        hung_up: Arc<AtomicBool>,
+    }
+
+    fn mute_server() -> MuteServer {
+        let runtime: tokio::runtime::Runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("mute runtime builds");
+
+        let hung_up: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+
+        let (endpoint, addr): (Endpoint<endpoint_side::Server>, SocketAddr) = runtime.block_on(async {
+            let identity: Identity = Identity::self_signed(["localhost"]).expect("self-signed identity");
+            let config: ServerConfig = ServerConfig::builder()
+                .with_bind_address("127.0.0.1:0".parse().expect("valid address"))
+                .with_identity(identity)
+                .build();
+
+            let endpoint: Endpoint<endpoint_side::Server> = Endpoint::server(config).expect("mute endpoint binds");
+            let addr: SocketAddr = endpoint.local_addr().expect("mute endpoint has an address");
+            (endpoint, addr)
+        });
+
+        let watcher: Arc<AtomicBool> = hung_up.clone();
+        runtime.spawn(async move {
+            loop {
+                let incoming: IncomingSession = endpoint.accept().await;
+                let watcher: Arc<AtomicBool> = watcher.clone();
+
+                tokio::spawn(async move {
+                    let Ok(request) = incoming.await else { return };
+                    let Ok(connection) = request.accept().await else { return };
+                    let conn: Connection = connection;
+                    if conn.accept_bi().await.is_err() {
+                        return;
+                    }
+
+                    conn.closed().await;
+                    watcher.store(true, Ordering::Relaxed);
+                });
+            }
+        });
+
+        MuteServer {
+            _runtime: runtime,
+            hung_up,
+            addr,
+        }
+    }
+
+    #[test]
+    fn client_gives_up_on_a_server_that_never_sends_a_welcome() {
+        let handshake_timeout: Duration = Duration::from_millis(500);
+        let server: MuteServer = mute_server();
+
+        let mut client: WebTransportClient =
+            WebTransportClient::with_handshake_timeout(server.addr, None, DEFAULT_PROTOCOL_ID, handshake_timeout)
+                .expect("client constructs");
+
+        let deadline: Instant = Instant::now() + handshake_timeout * 10;
+        while Instant::now() < deadline && !server.hung_up.load(Ordering::Relaxed) {
+            client.update();
+            assert!(
+                !client.is_connected(),
+                "a client must not report connected without a welcome frame"
+            );
+            sleep(Duration::from_millis(10));
+        }
+
+        assert!(
+            server.hung_up.load(Ordering::Relaxed),
+            "the client hung waiting for a welcome that never came, instead of giving up after the handshake timeout"
+        );
+
+        assert!(!client.is_connected());
     }
 
     #[test]

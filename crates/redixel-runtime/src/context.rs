@@ -29,6 +29,7 @@ pub struct Context<A: InputAction> {
     fps: f64,
     fixed_delta: f64,
     fixed_tick: u64,
+    fixed_alpha: f64,
     surface_width: u32,
     surface_height: u32,
     pub(crate) input: InputManager<A>,
@@ -51,6 +52,7 @@ impl<A: InputAction> Context<A> {
             fps: 0.0,
             fixed_delta: 0.0,
             fixed_tick: 0,
+            fixed_alpha: 0.0,
             surface_width: 0,
             surface_height: 0,
             input: InputManager::new(),
@@ -69,6 +71,14 @@ impl<A: InputAction> Context<A> {
     pub(crate) fn set_fixed(&mut self, fixed_delta: f64, fixed_tick: u64) {
         self.fixed_delta = fixed_delta;
         self.fixed_tick = fixed_tick;
+    }
+
+    /// Sets how far into the next fixed step this frame falls. Called once
+    /// per frame after the fixed-update loop has consumed every full step
+    /// it owed, so the leftover reflects exactly the gap `on_update`/
+    /// `on_render` need to extrapolate across.
+    pub(crate) fn set_fixed_alpha(&mut self, alpha: f64) {
+        self.fixed_alpha = alpha;
     }
 
     /// Updates the surface dimensions. Called on resize and after init.
@@ -131,6 +141,10 @@ impl<A: InputAction> GameContext<A> for Context<A> {
 
     fn fixed_tick(&self) -> u64 {
         self.fixed_tick
+    }
+
+    fn fixed_alpha(&self) -> f64 {
+        self.fixed_alpha
     }
 
     fn fps(&self) -> f64 {

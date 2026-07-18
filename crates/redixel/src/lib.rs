@@ -147,10 +147,8 @@ pub fn run_wasm<G: Game + 'static>(game: G) -> Result<(), RedixelError> {
     run_wasm_with(game, build_config())
 }
 
-/// Like [`run_wasm`] but with an explicit [`RuntimeConfig`].
-///
-/// Browser WebTransport is not implemented yet: a `config.net` other than
-/// `Offline` logs an error and degrades to the no-op transport.
+/// Like [`run_wasm`] but with an explicit [`RuntimeConfig`] — use this to run a
+/// **windowed client** with networking enabled (set `config.net`).
 #[cfg(target_arch = "wasm32")]
 pub fn run_wasm_with<G: Game + 'static>(game: G, config: RuntimeConfig) -> Result<(), RedixelError> {
     let event_loop: EventLoop = EventLoop::new()?;

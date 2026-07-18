@@ -48,7 +48,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libasound2-dev libudev-dev libxkbcommon-x11-0 xvfb mesa-vulkan-drivers
+          sudo apt-get install -y libxkbcommon-x11-0 xvfb mesa-vulkan-drivers
 
       - name: Setup Rust
         run: rustup show
@@ -166,7 +166,6 @@ jobs:
           subcommand: clippy
           target: wasm32-unknown-unknown
           args: '-- -D warnings'
-          exclude: shooter_mp
 
       - name: Build Executables (WASM)
         uses: ./.github/actions/cargo-each
@@ -174,7 +173,6 @@ jobs:
           subcommand: build
           target: wasm32-unknown-unknown
           args: '--verbose'
-          exclude: shooter_mp
 
   android:
     name: Android (APK)
@@ -251,3 +249,59 @@ jobs:
           target: aarch64-apple-ios
           args: '--lib'
           skip-root: 'true'
+
+  benchmark:
+    name: FPS Benchmark
+    needs: format
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install Linux Graphics Deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-x11-0 xvfb mesa-vulkan-drivers
+
+      - name: Setup Rust
+        run: rustup show
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build Benchmark Tool
+        run: cargo build --release -p fps-bench
+
+      - name: Run Benchmark
+        run: xvfb-run --auto-servernum ./target/release/fps-bench benchmark_result.json
+        env:
+          WGPU_BACKEND: vulkan
+
+      - name: Format Results
+        run: |
+          {
+            echo "<h3 align=\"center\">FPS Benchmark</h3>"
+            echo "<p align=\"center\"><sub>Measures CPU-side engine cost (batching, frame loop) under a software-rendered GPU — not representative of real hardware FPS.</sub></p>"
+            echo
+            echo "<table align=\"center\">"
+            echo "<thead><tr><th align=\"center\">Scene</th><th align=\"center\">Avg FPS</th><th align=\"center\">Avg Frame Time (ms)</th><th align=\"center\">P95 Frame Time (ms)</th><th align=\"center\">Allocations</th></tr></thead>"
+            echo "<tbody>"
+            jq -r '.tiers[] | "<tr><td align=\"center\">\(.scene)</td><td align=\"center\"><strong>\(.avg_fps)</strong></td><td align=\"center\">\(.avg_frame_ms)</td><td align=\"center\">\(.p95_frame_ms)</td><td align=\"center\">\(.allocations) (\(.allocated_bytes) B)</td></tr>"' benchmark_result.json
+            echo "</tbody>"
+            echo "</table>"
+            echo
+            echo "<p align=\"center\"><sub>Marginal cost: <strong>$(jq -r '.marginal_ms_per_1000_quads' benchmark_result.json) ms</strong> per 1000 additional quads · P95 surfaces stutter an average would hide · allocations counted only during the sampled window.</sub></p>"
+          } > benchmark_summary.md
+
+      - name: Show Results in Job Summary
+        run: cat benchmark_summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Comment Results on PR
+        run: gh pr comment "${{ github.event.pull_request.number }}" --edit-last --create-if-none --body-file benchmark_summary.md
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

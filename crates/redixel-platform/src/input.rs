@@ -28,6 +28,8 @@ pub struct InputManager<A: InputAction> {
     mouse_position: Option<Vec2>,
     pending_keys: Vec<(KeyCode, ElementState)>,
     pending_mouse: Vec<(MouseButton, ElementState)>,
+    deferred_key_releases: Vec<(KeyCode, ElementState)>,
+    deferred_mouse_releases: Vec<(MouseButton, ElementState)>,
     scroll_accumulator: Vec2,
     scroll_delta: Vec2,
     bindings: HashMap<A, HashSet<InputSource>>,
@@ -41,6 +43,8 @@ impl<A: InputAction> InputManager<A> {
             mouse_position: None,
             pending_keys: Vec::new(),
             pending_mouse: Vec::new(),
+            deferred_key_releases: Vec::new(),
+            deferred_mouse_releases: Vec::new(),
             scroll_accumulator: Vec2::ZERO,
             scroll_delta: Vec2::ZERO,
             bindings: HashMap::new(),
@@ -56,8 +60,8 @@ impl<A: InputAction> InputManager<A> {
     pub fn tick(&mut self) {
         Self::advance_states(&mut self.key_states);
         Self::advance_states(&mut self.mouse_states);
+        self.deferred_mouse_releases.clear();
 
-        let mut deferred_mouse_releases: Vec<(MouseButton, ElementState)> = Vec::new();
         for (btn, state) in self.pending_mouse.drain(..) {
             match state {
                 ElementState::Pressed => {
@@ -65,16 +69,17 @@ impl<A: InputAction> InputManager<A> {
                 }
                 ElementState::Released => {
                     if self.mouse_states.get(&btn) == Some(&KeyState::JustPressed) {
-                        deferred_mouse_releases.push((btn, state));
+                        self.deferred_mouse_releases.push((btn, state));
                     } else {
                         self.mouse_states.insert(btn, KeyState::JustReleased);
                     }
                 }
             }
         }
-        self.pending_mouse.extend(deferred_mouse_releases);
 
-        let mut deferred_key_releases: Vec<(KeyCode, ElementState)> = Vec::new();
+        self.pending_mouse.append(&mut self.deferred_mouse_releases);
+        self.deferred_key_releases.clear();
+
         for (code, state) in self.pending_keys.drain(..) {
             match state {
                 ElementState::Pressed => {
@@ -82,15 +87,15 @@ impl<A: InputAction> InputManager<A> {
                 }
                 ElementState::Released => {
                     if self.key_states.get(&code) == Some(&KeyState::JustPressed) {
-                        deferred_key_releases.push((code, state));
+                        self.deferred_key_releases.push((code, state));
                     } else {
                         self.key_states.insert(code, KeyState::JustReleased);
                     }
                 }
             }
         }
-        self.pending_keys.extend(deferred_key_releases);
 
+        self.pending_keys.append(&mut self.deferred_key_releases);
         self.scroll_delta = self.scroll_accumulator;
         self.scroll_accumulator = Vec2::ZERO;
     }

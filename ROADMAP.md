@@ -92,5 +92,5 @@
 - [x] **Headless Mode:** `RuntimeConfig::headless()` + `HeadlessRuntime` run the engine with no `winit`/`wgpu`, driving only the fixed-update loop — the same `Game` implementation runs unmodified as a dedicated server.
 - [x] **Fixed Update Loop:** `on_fixed_update` runs on a deterministic accumulator shared by the windowed and headless runtimes, decoupled from render framerate.
 - [x] **Network API:** `ctx.network()` on `GameContext` exposes inbound connection/message events, reliable and unreliable send/broadcast, and connection/tickrate queries to game code.
+- [x] **Browser (WASM) Transport:** `redixel-net::wasm` implements the same `NetworkManager` over `web-sys`'s `WebTransport` bindings, speaking the identical wire protocol as the native backend — desktop, Android, iOS, and browser clients all join the same match. Self-signed servers are trusted via certificate hash pinning (`NetConfig::with_server_cert_hash`), since browsers cannot disable certificate validation the way native/mobile clients do.
 - [ ] **State Serialization:** Still open — `NetworkManager` moves opaque byte payloads with no built-in (de)serialization; a reusable engine-level utility is a candidate for a future story.
-- [ ] **Browser (WASM) Transport:** Not yet implemented — deferred to a separate future story.

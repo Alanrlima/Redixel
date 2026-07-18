@@ -103,6 +103,19 @@ pub trait GameContext<A: InputAction> {
     /// server reconciliation (see [`SequenceBuffer`](crate::net::SequenceBuffer)).
     fn fixed_tick(&self) -> u64;
 
+    /// Fraction `[0, 1)` of the way into the next fixed step, measured at the
+    /// moment `on_update`/`on_render` runs for this frame.
+    ///
+    /// The render framerate rarely lines up with the fixed-update tickrate,
+    /// so a value simulated once per tick (a client-predicted local
+    /// position, a physics body) sits still for however many rendered frames
+    /// land between two ticks unless something accounts for the gap. Scale a
+    /// per-tick delta (e.g. a velocity times [`fixed_delta`](Self::fixed_delta))
+    /// by this fraction and add it in `on_render` to extrapolate that value
+    /// smoothly across those frames, matching the display's own cadence
+    /// instead of the simulation's.
+    fn fixed_alpha(&self) -> f64;
+
     /// Current FPS measurement.
     fn fps(&self) -> f64;
 
