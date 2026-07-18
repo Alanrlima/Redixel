@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   - Authoritative-server twin-stick shooter demo — headless server, desktop/Android/iOS/browser clients.
   - Reliable channel for one-shot effects, unreliable for continuous world state.
   - Client-side prediction and reconciliation for local player movement.
+  - Delay-buffered interpolation for remote agents, absorbing snapshot jitter/loss without extrapolating.
 - **`redixel::prelude`** now re-exports `CertSource`/`DEFAULT_PROTOCOL_ID`.
 - **`net` Cargo feature:** `redixel-net` is optional, feature-gated in `redixel`/`redixel-runtime`.
 - `EngineSettings::load_config_json()` and a new `engine.tickrate` key in `config/config.json`.

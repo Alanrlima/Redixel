@@ -47,6 +47,31 @@ const RENDER_ERROR_EPSILON: f32 = 0.5;
 /// a server that stops confirming cannot grow the history without bound.
 const PREDICTION_HISTORY: usize = 120;
 
+/// How far behind the freshest snapshot, in server ticks, the remote-entity
+/// render clock is held. Remote agents are drawn interpolated at this delay,
+/// so ordinary arrival jitter and a lost snapshot or two land *inside* the
+/// buffer and never surface as the freeze-then-teleport of drawing the newest
+/// snapshot raw. The cost is this many ticks of visual latency on **other**
+/// players — never the local one, which is predicted, not interpolated — and
+/// it is invisible to the authoritative server, which resolves hits on its own
+/// timeline regardless.
+const INTERP_DELAY_TICKS: f64 = 2.0;
+
+/// Rate (per second) the render clock is eased back toward its ideal
+/// [`INTERP_DELAY_TICKS`] offset, to soak up client/server clock drift without
+/// a visible jump in remote playback speed.
+const RENDER_CLOCK_CATCHUP: f64 = 1.0;
+
+/// If the render clock falls more than this many ticks behind the freshest
+/// snapshot (a lag spike delivering a burst of snapshots at once), it resyncs
+/// on the spot instead of speed-crawling across the whole backlog.
+const MAX_INTERP_LAG_TICKS: f64 = 8.0;
+
+/// Recent snapshots kept for remote interpolation, oldest at the front. Half a
+/// second at 60 Hz — far more than [`INTERP_DELAY_TICKS`] needs, so a burst of
+/// late arrivals still finds a bracketing pair.
+const SNAPSHOT_BUFFER: usize = 32;
+
 /// The client's input action set, bound to keyboard and mouse in `on_start`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Action {
@@ -161,6 +186,8 @@ impl Prediction {
 /// only local cosmetic state (particles, shake, timers) beyond that.
 pub struct Client {
     latest: Option<Snapshot>,
+    snapshots: VecDeque<Snapshot>,
+    render_tick: Option<f64>,
     last_tick: Option<u64>,
     prediction: Option<Prediction>,
     next_input_seq: u32,
@@ -179,6 +206,8 @@ impl Client {
     pub fn new() -> Self {
         Self {
             latest: None,
+            snapshots: VecDeque::new(),
+            render_tick: None,
             last_tick: None,
             prediction: None,
             next_input_seq: 1,
@@ -291,7 +320,12 @@ impl Client {
             self.prev_health.insert(agent.owner, agent.health);
         }
 
-        self.latest = Some(snapshot);
+        self.snapshots.push_back(snapshot);
+        if self.snapshots.len() > SNAPSHOT_BUFFER {
+            self.snapshots.pop_front();
+        }
+
+        self.latest = self.snapshots.back().cloned();
     }
 
     /// Applies a just-sent input to the local prediction immediately — the
@@ -394,13 +428,101 @@ impl Client {
         }
     }
 
-    /// The world to draw this frame: the latest server snapshot, unblended.
+    /// Advances the remote-entity render clock by one frame of real time,
+    /// expressed in server ticks (`dt / tick_duration`), keeping it about
+    /// [`INTERP_DELAY_TICKS`] behind the freshest buffered snapshot.
     ///
-    /// Only the local player gets smoothing (via [`Prediction`] and its
-    /// extrapolation) — remote agents and bullets render exactly what the
-    /// server last reported, with no interpolation between ticks.
-    fn world(&self) -> Option<Snapshot> {
-        self.latest.clone()
+    /// The clock is eased toward that ideal offset ([`RENDER_CLOCK_CATCHUP`])
+    /// so client/server clock drift never shows as a speed pop, resynced
+    /// outright if it falls a whole [`MAX_INTERP_LAG_TICKS`] behind, and — this
+    /// is the load-bearing part — clamped to never pass the newest snapshot, so
+    /// [`interpolated_world`](Self::interpolated_world) only ever interpolates
+    /// between two snapshots it already holds and never extrapolates a remote
+    /// into the unknown.
+    fn advance_render_clock(&mut self, dt: f64, tick_duration: f64) {
+        let (Some(newest), Some(oldest)): (Option<u64>, Option<u64>) = (
+            self.snapshots.back().map(|s: &Snapshot| s.tick),
+            self.snapshots.front().map(|s: &Snapshot| s.tick),
+        ) else {
+            return;
+        };
+
+        if tick_duration <= 0.0 {
+            return;
+        }
+
+        let newest: f64 = newest as f64;
+        let oldest: f64 = oldest as f64;
+        let target: f64 = newest - INTERP_DELAY_TICKS;
+
+        let Some(rt): Option<f64> = self.render_tick else {
+            self.render_tick = Some(target.max(oldest));
+            return;
+        };
+
+        let mut next: f64 = rt + dt / tick_duration;
+        next += (target - next) * RENDER_CLOCK_CATCHUP * dt;
+        if next < newest - MAX_INTERP_LAG_TICKS {
+            next = target;
+        }
+
+        self.render_tick = Some(next.clamp(oldest, newest));
+    }
+
+    /// The world to draw this frame: remote agents interpolated between the two
+    /// buffered snapshots that straddle the render clock (matched by
+    /// [`AgentState::owner`], a stable id — never list position), with bullets
+    /// and every other field taken from the newer of the pair.
+    ///
+    /// The local player is not smoothed here — [`on_render`](Self::on_render)
+    /// overwrites its entry with the predicted/extrapolated position afterward.
+    /// Bullets are deliberately left un-interpolated: they are fast, transient,
+    /// carry no stable id to match across snapshots, and read as motion rather
+    /// than jitter. `None` until the render clock has a first snapshot to sit on.
+    fn interpolated_world(&self) -> Option<Snapshot> {
+        let rt: f64 = self.render_tick?;
+
+        let mut lo: &Snapshot = self.snapshots.front()?;
+        let mut hi: &Snapshot = self.snapshots.back()?;
+        for snap in self.snapshots.iter() {
+            if (snap.tick as f64) <= rt {
+                lo = snap;
+            }
+
+            if (snap.tick as f64) >= rt {
+                hi = snap;
+                break;
+            }
+        }
+
+        let span: f64 = (hi.tick as f64) - (lo.tick as f64);
+        let alpha: f32 = if span > 0.0 {
+            ((rt - lo.tick as f64) / span) as f32
+        } else {
+            0.0
+        };
+
+        let agents: Vec<AgentState> = hi
+            .agents
+            .iter()
+            .map(|target: &AgentState| -> AgentState {
+                let pos: Vec2 = match lo.agents.iter().find(|a: &&AgentState| a.owner == target.owner) {
+                    Some(from) => from.pos.vec().lerp(target.pos.vec(), alpha),
+                    None => target.pos.vec(),
+                };
+                AgentState {
+                    pos: V2::of(pos),
+                    ..*target
+                }
+            })
+            .collect();
+
+        Some(Snapshot {
+            tick: hi.tick,
+            agents,
+            bullets: hi.bullets.clone(),
+            powerup: hi.powerup,
+        })
     }
 
     /// The center of the local player's body **as drawn this frame**: the
@@ -427,13 +549,16 @@ impl Client {
             Some(p) => p,
             None => return Vec2::ZERO,
         };
+
         let center: Vec2 = match self.own_center() {
             Some(c) => c,
             None => return Vec2::ZERO,
         };
+
         if scale <= 0.0 {
             return Vec2::ZERO;
         }
+
         let raw: Vec2 = (mouse - offset) / scale - center;
         if raw.length_sq() > 0.0 {
             raw.normalise()
@@ -454,12 +579,15 @@ impl Client {
         if ctx.input().held(Action::Left) {
             move_dir -= Vec2::X;
         }
+
         if ctx.input().held(Action::Right) {
             move_dir += Vec2::X;
         }
+
         if ctx.input().held(Action::Up) {
             move_dir -= Vec2::Y;
         }
+
         if ctx.input().held(Action::Down) {
             move_dir += Vec2::Y;
         }
@@ -485,6 +613,7 @@ impl Client {
             } else {
                 BASE_COOLDOWN
             };
+
             self.local_shoot_cooldown = cooldown;
             self.fx.add_shake(recoil_for(agent.weapon) * 0.015);
         }
@@ -534,11 +663,13 @@ impl Client {
     ) {
         for agent in snapshot.agents.iter() {
             let (r, g, b): (u8, u8, u8) = player_color(agent.owner);
+
             let body: Color = if agent.rapid_fire {
                 Color::from_rgba8(255, 200, 50, 255)
             } else {
                 Color::from_rgba8(r, g, b, 255)
             };
+
             let pos: Vec2 = agent.pos.vec();
 
             ctx.draw_rect(
@@ -546,6 +677,7 @@ impl Client {
                 Vec2::splat(ENTITY_SIZE * scale),
                 Color::from_rgba8(0, 0, 0, 150),
             );
+
             ctx.draw_rect(to_screen(pos), Vec2::splat(ENTITY_SIZE * scale), body);
 
             let inner_size: f32 = ENTITY_SIZE * 0.4;
@@ -564,6 +696,7 @@ impl Client {
                 Vec2::new(ENTITY_SIZE * scale, 4.0 * scale),
                 Color::rgb(0.7, 0.1, 0.1),
             );
+
             ctx.draw_rect(
                 to_screen(hp_pos),
                 Vec2::new(ENTITY_SIZE * hp_percent * scale, 4.0 * scale),
@@ -591,11 +724,13 @@ impl Client {
                 Vec2::splat(bullet.size * scale),
                 Color::from_rgba8(0, 0, 0, 100),
             );
+
             ctx.draw_rect(
                 to_screen(pos - Vec2::splat(4.0)),
                 Vec2::splat((bullet.size + 8.0) * scale),
                 glow,
             );
+
             ctx.draw_rect(to_screen(pos), Vec2::splat(bullet.size * scale), core);
         }
     }
@@ -631,7 +766,7 @@ impl Game for Client {
         if self.afterimage_clock <= 0.0 {
             self.afterimage_clock = AFTERIMAGE_INTERVAL;
 
-            if let Some(world) = self.world() {
+            if let Some(world) = self.interpolated_world() {
                 for agent in world.agents.iter() {
                     if agent.dashing {
                         let color: (u8, u8, u8) = if agent.rapid_fire {
@@ -653,12 +788,13 @@ impl Game for Client {
         self.time = (self.time + dt) % 3600.0;
         self.trail_clock -= dt;
         self.decay_render_error(dt);
+        self.advance_render_clock(ctx.delta_time(), ctx.fixed_delta());
         self.fx.update(dt);
 
         if self.trail_clock <= 0.0 {
             self.trail_clock = TRAIL_INTERVAL;
 
-            if let Some(world) = self.world() {
+            if let Some(world) = self.interpolated_world() {
                 for bullet in world.bullets.iter() {
                     let (r, g, b_c): (u8, u8, u8) = weapon_color(bullet.weapon);
                     self.fx.spawn_burst(ParticleProps {
@@ -688,7 +824,7 @@ impl Game for Client {
 
         let tick_duration: f32 = ctx.fixed_delta() as f32;
         let alpha: f32 = ctx.fixed_alpha() as f32;
-        let mut world: Option<Snapshot> = self.world();
+        let mut world: Option<Snapshot> = self.interpolated_world();
 
         if let Some(world) = world.as_mut()
             && let Some(pred) = self.prediction.as_ref()
@@ -717,6 +853,7 @@ impl Game for Client {
             Vec2::new(ARENA_W, ARENA_H) * scale,
             Color::rgb(0.10, 0.10, 0.13),
         );
+
         self.draw_grid(ctx, to_screen, scale, parallax);
 
         let snapshot: &Snapshot = match world.as_ref() {
@@ -725,11 +862,13 @@ impl Game for Client {
                 let pulse: f32 = (self.time * 3.0).sin().abs() * 0.5 + 0.5;
                 let size: f32 = ENTITY_SIZE * 2.0;
                 let center: Vec2 = Vec2::new(ARENA_W / 2.0, ARENA_H / 2.0) - Vec2::splat(size / 2.0);
+
                 ctx.draw_rect(
                     to_screen(center),
                     Vec2::splat(size * scale),
                     Color::from_rgba8(80, 80, 120, (pulse * 200.0) as u8),
                 );
+
                 return;
             }
         };
@@ -748,6 +887,7 @@ impl Game for Client {
                 Vec2::splat(p_size * scale),
                 Color::from_rgba8(0, 0, 0, 150),
             );
+
             ctx.draw_rect(to_screen(p_draw_pos), Vec2::splat(p_size * scale), color);
         }
 
@@ -787,18 +927,145 @@ mod tests {
         }
     }
 
-    #[test]
-    fn world_is_none_before_the_first_snapshot() {
-        let client: Client = Client::new();
-        assert_eq!(client.world(), None);
+    fn agent_at(owner: ClientId, x: f32, y: f32) -> AgentState {
+        AgentState {
+            owner,
+            pos: V2 { x, y },
+            input_seq: 0,
+            health: 100,
+            weapon: Weapon::Pistol,
+            rapid_fire: false,
+            dashing: false,
+        }
+    }
+
+    fn remote_snap(tick: u64, agents: Vec<AgentState>) -> Snapshot {
+        Snapshot {
+            tick,
+            agents,
+            bullets: Vec::new(),
+            powerup: None,
+        }
+    }
+
+    fn buffered(snaps: Vec<Snapshot>, render_tick: f64) -> Client {
+        let mut client: Client = Client::new();
+        for snap in snaps {
+            client.snapshots.push_back(snap);
+        }
+        client.render_tick = Some(render_tick);
+        client
     }
 
     #[test]
-    fn world_returns_the_latest_snapshot_unblended() {
+    fn interpolated_world_is_none_before_the_first_snapshot() {
+        assert_eq!(Client::new().interpolated_world(), None);
+    }
+
+    #[test]
+    fn interpolated_world_lerps_a_remote_agent_halfway_by_owner() {
+        let client: Client = buffered(
+            vec![
+                remote_snap(10, vec![agent_at(2, 0.0, 0.0)]),
+                remote_snap(11, vec![agent_at(2, 100.0, 40.0)]),
+            ],
+            10.5,
+        );
+
+        let world: Snapshot = client.interpolated_world().expect("a bracketing pair exists");
+        assert_eq!(world.agents[0].pos.x, 50.0, "halfway between the two ticks");
+        assert_eq!(world.agents[0].pos.y, 20.0);
+    }
+
+    #[test]
+    fn interpolated_world_matches_agents_by_owner_not_list_order() {
+        let client: Client = buffered(
+            vec![
+                remote_snap(10, vec![agent_at(1, 0.0, 0.0), agent_at(2, 0.0, 0.0)]),
+                remote_snap(11, vec![agent_at(2, 100.0, 0.0), agent_at(1, 200.0, 0.0)]),
+            ],
+            10.5,
+        );
+
+        let world: Snapshot = client.interpolated_world().expect("a bracketing pair exists");
+        let owner1: &AgentState = world
+            .agents
+            .iter()
+            .find(|a: &&AgentState| a.owner == 1)
+            .expect("owner 1");
+
+        let owner2: &AgentState = world
+            .agents
+            .iter()
+            .find(|a: &&AgentState| a.owner == 2)
+            .expect("owner 2");
+
+        assert_eq!(owner1.pos.x, 100.0, "owner 1 lerps its own 0->200, not against owner 2's slot");
+        assert_eq!(owner2.pos.x, 50.0, "owner 2 lerps its own 0->100");
+    }
+
+    #[test]
+    fn interpolated_world_bridges_a_dropped_snapshot() {
+        let client: Client = buffered(
+            vec![
+                remote_snap(10, vec![agent_at(2, 0.0, 0.0)]),
+                remote_snap(12, vec![agent_at(2, 200.0, 0.0)]),
+            ],
+            11.0,
+        );
+
+        let world: Snapshot = client.interpolated_world().expect("a bracketing pair exists");
+        assert_eq!(
+            world.agents[0].pos.x, 100.0,
+            "a lost snapshot interpolates across the gap instead of freezing then jumping"
+        );
+    }
+
+    #[test]
+    fn interpolated_world_holds_at_the_newest_and_never_extrapolates() {
+        let client: Client = buffered(
+            vec![
+                remote_snap(10, vec![agent_at(2, 0.0, 0.0)]),
+                remote_snap(11, vec![agent_at(2, 100.0, 0.0)]),
+            ],
+            50.0,
+        );
+
+        let world: Snapshot = client
+            .interpolated_world()
+            .expect("the newest snapshot is always drawable");
+
+        assert_eq!(
+            world.agents[0].pos.x, 100.0,
+            "a starved clock holds on the newest, never invents a future position"
+        );
+    }
+
+    #[test]
+    fn advance_render_clock_trails_the_newest_without_passing_it() {
+        let snaps: Vec<Snapshot> = (10..=20u64)
+            .map(|t: u64| remote_snap(t, vec![agent_at(2, t as f32, 0.0)]))
+            .collect();
+
         let mut client: Client = Client::new();
-        client.latest = Some(snap(1, 40.0, Vec::new()));
-        let world: Snapshot = client.world().expect("a snapshot was set");
-        assert_eq!(world.agents[0].pos.x, 40.0);
+        for snap in snaps {
+            client.snapshots.push_back(snap);
+        }
+
+        client.advance_render_clock(TICK as f64, TICK as f64);
+        let seeded: f64 = client.render_tick.expect("the first call seeds the clock");
+        assert!(seeded <= 20.0, "the clock starts at or behind the newest tick, got {seeded}");
+        assert!(
+            seeded >= 20.0 - INTERP_DELAY_TICKS - 1e-3,
+            "and no further back than the interpolation delay, got {seeded}"
+        );
+
+        client.advance_render_clock(10.0, TICK as f64);
+        let after: f64 = client.render_tick.expect("the clock advanced");
+        assert!(
+            after <= 20.0,
+            "a huge frame must not let the clock pass the newest snapshot, got {after}"
+        );
     }
 
     fn right_input(seq: u32) -> PlayerInput {
@@ -860,6 +1127,7 @@ mod tests {
             .prediction
             .as_ref()
             .expect("first snapshot installs the prediction");
+
         assert_eq!(pred.pos.x, 40.0);
         assert_eq!(pred.pos.y, 25.0);
     }
