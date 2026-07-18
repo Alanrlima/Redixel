@@ -132,7 +132,7 @@ mod wasm {
     /// self-signed certificate, logged by the native server on startup —
     /// paste it here to let the browser trust a self-signed/LAN server.
     /// Leave empty when connecting to a CA-trusted `server_name` deployment.
-    const SERVER_CERT_HASH_HEX: &str = "GENERATED_CERT_HASH";
+    const SERVER_CERT_HASH_HEX: &str = "SERVER_CERT_HASH_HEX";
 
     #[wasm_bindgen(start)]
     pub fn wasm_main() -> Result<(), RedixelError> {
