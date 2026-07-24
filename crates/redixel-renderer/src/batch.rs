@@ -1,11 +1,12 @@
-use wgpu::{Buffer, BufferDescriptor, BufferUsages, Device, Queue, RenderPass};
+use wgpu::{Buffer, BufferDescriptor, BufferUsages, Device, IndexFormat, Queue, RenderPass};
 
 use redixel_math::{Color, Vec2};
 
 use crate::pipeline::Vertex;
 
 const MAX_QUADS: usize = 10_000;
-const MAX_VERTICES: usize = MAX_QUADS * 6;
+const MAX_VERTICES: usize = MAX_QUADS * 4;
+const MAX_INDICES: usize = MAX_QUADS * 6;
 
 /// Accumulates `draw_rect` calls per frame and submits them to the GPU in a
 /// single draw call on `flush()`.
@@ -14,7 +15,9 @@ const MAX_VERTICES: usize = MAX_QUADS * 6;
 /// grouping same-pipeline geometry together.
 pub struct SpriteBatch {
     vertex_buffer: Buffer,
+    index_buffer: Buffer,
     vertices: Vec<Vertex>,
+    indices: Vec<u16>,
 }
 
 impl SpriteBatch {
@@ -26,9 +29,18 @@ impl SpriteBatch {
             mapped_at_creation: false,
         });
 
+        let index_buffer: Buffer = device.create_buffer(&BufferDescriptor {
+            label: Some("REDIXEL_SPRITE_BATCH_IB"),
+            size: (MAX_INDICES * std::mem::size_of::<u16>()) as u64,
+            usage: BufferUsages::INDEX | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         Self {
             vertex_buffer,
+            index_buffer,
             vertices: Vec::with_capacity(MAX_VERTICES),
+            indices: Vec::with_capacity(MAX_INDICES),
         }
     }
 
@@ -38,7 +50,7 @@ impl SpriteBatch {
     /// - `size`     — width × height in world units
     /// - `color`    — RGBA fill colour
     pub fn draw_rect(&mut self, position: Vec2, size: Vec2, color: Color) {
-        if self.vertices.len() + 6 > MAX_VERTICES {
+        if self.vertices.len() + 4 > MAX_VERTICES {
             log::warn!("SpriteBatch: MAX_QUADS ({MAX_QUADS}) exceeded — quad dropped.");
             return;
         }
@@ -69,7 +81,19 @@ impl SpriteBatch {
             color: c,
         };
 
-        self.vertices.extend_from_slice(&[tl, bl, tr, tr, bl, br]);
+        let base_vertex: u16 = self.vertices.len() as u16;
+        self.vertices.extend_from_slice(&[tl, tr, bl, br]);
+
+        let quad_indices: [u16; 6] = [
+            base_vertex,
+            base_vertex + 2,
+            base_vertex + 1,
+            base_vertex + 1,
+            base_vertex + 2,
+            base_vertex + 3,
+        ];
+
+        self.indices.extend_from_slice(&quad_indices);
     }
 
     /// Queues a filled triangle for drawing.
@@ -99,7 +123,11 @@ impl SpriteBatch {
             color: c,
         };
 
+        let base_vertex: u16 = self.vertices.len() as u16;
         self.vertices.extend_from_slice(&[v1, v2, v3]);
+
+        let triangle_indices: [u16; 3] = [base_vertex, base_vertex + 1, base_vertex + 2];
+        self.indices.extend_from_slice(&triangle_indices);
     }
 
     /// Returns the number of vertices currently queued.
@@ -107,23 +135,32 @@ impl SpriteBatch {
         self.vertices.len()
     }
 
-    /// Uploads queued vertices to the GPU and records the draw call.
+    /// Uploads queued vertices and indices to the GPU and records the indexed
+    /// draw call.
     ///
     /// Must be called **inside** an active `RenderPass`.
-    /// Clears the internal queue after submission.
+    /// Clears the internal queues after submission.
     pub fn flush<'rp>(&mut self, queue: &Queue, pass: &mut RenderPass<'rp>)
     where
         Self: 'rp,
     {
-        let count: usize = self.vertices.len();
+        let count: usize = self.indices.len();
         if count == 0 {
             return;
         }
 
+        if !count.is_multiple_of(2) {
+            self.indices.push(0);
+        }
+
         queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&self.vertices));
+        queue.write_buffer(&self.index_buffer, 0, bytemuck::cast_slice(&self.indices));
+
         pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-        pass.draw(0..count as u32, 0..1);
+        pass.set_index_buffer(self.index_buffer.slice(..), IndexFormat::Uint16);
+        pass.draw_indexed(0..count as u32, 0, 0..1);
 
         self.vertices.clear();
+        self.indices.clear();
     }
 }
