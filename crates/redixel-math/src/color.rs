@@ -171,6 +171,7 @@ impl Default for Color {
 /// Gated behind the `wgpu` feature so this crate does not force a graphics-API
 /// dependency on consumers that only want the maths.
 #[cfg(feature = "wgpu")]
+#[cfg_attr(docsrs, doc(cfg(feature = "wgpu")))]
 impl From<Color> for wgpu::Color {
     fn from(c: Color) -> Self {
         wgpu::Color {
