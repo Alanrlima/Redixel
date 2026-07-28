@@ -1,5 +1,3 @@
-#![cfg_attr(docsrs, feature(doc_cfg))]
-
 pub mod color;
 pub mod mat4;
 pub mod vec2;
