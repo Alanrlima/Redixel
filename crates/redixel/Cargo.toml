@@ -12,8 +12,8 @@ net = ["dep:redixel-net", "redixel-runtime/net"]
 
 [dependencies]
 # Internal crates
-redixel-core = { workspace = true }
-redixel-math = { workspace = true }
+redixel-core = { workspace = true, features = ["wgpu"] }
+redixel-math = { workspace = true, features = ["wgpu"] }
 redixel-platform = { workspace = true }
 redixel-renderer = { workspace = true }
 redixel-runtime = { workspace = true }

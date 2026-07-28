@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
 use wgpu::{
-    Adapter, BackendOptions, Backends, Device, ExperimentalFeatures, Features, Instance, InstanceDescriptor,
-    InstanceFlags, MemoryBudgetThresholds, MemoryHints, PowerPreference, PresentMode, Queue, RequestAdapterOptions,
-    Surface, SurfaceCapabilities, SurfaceColorSpace, SurfaceConfiguration, TextureFormat, TextureUsages, Trace,
+    Adapter, AdapterInfo, Backend, BackendOptions, Backends, Device, DeviceType, ExperimentalFeatures, Features,
+    Instance, InstanceDescriptor, InstanceFlags, MemoryBudgetThresholds, MemoryHints, PowerPreference, PresentMode,
+    Queue, RequestAdapterOptions, Surface, SurfaceCapabilities, SurfaceColorSpace, SurfaceConfiguration, TextureFormat,
+    TextureUsages, Trace,
     wgt::{DeviceDescriptor, SurfaceConfiguration as WgtSurfaceConfiguration},
 };
 
@@ -12,6 +13,32 @@ use winit::{dpi::PhysicalSize, window::Window};
 use redixel_core::RedixelError;
 
 use crate::renderer::RendererConfig;
+
+/// Formats an adapter for logging, tolerating the fields a backend leaves blank.
+///
+/// Browsers deliberately withhold adapter identity to limit fingerprinting, so
+/// under WebGPU the name and both driver strings arrive empty. Blank fields are
+/// replaced or dropped rather than logged as empty text; the device type and
+/// backend are populated on every platform and carry the useful signal when the
+/// rest is missing.
+///
+/// Takes the individual fields rather than an [`AdapterInfo`] so it stays
+/// testable without constructing one — `wgpu` adds fields to that struct
+/// between releases.
+fn describe_adapter(name: &str, driver: &str, driver_info: &str, device_type: DeviceType, backend: Backend) -> String {
+    let name: &str = match name.trim() {
+        "" => "unidentified adapter",
+        name => name,
+    };
+
+    let driver: String = match (driver.trim(), driver_info.trim()) {
+        ("", "") => String::new(),
+        ("", detail) | (detail, "") => format!(" driver: {detail}"),
+        (driver, detail) => format!(" driver: {driver} {detail}"),
+    };
+
+    format!("{name} [{device_type:?} / {backend:?}]{driver}")
+}
 
 /// Owns the WGPU logical device, presentation surface, and submission queue.
 ///
@@ -32,10 +59,13 @@ impl GpuDevice {
         let instance: Instance = Self::create_instance(cfg.backends);
         let surface: Surface<'_> = Self::create_surface(&instance, &window)?;
         let adapter: Adapter = Self::request_adapter(&instance, &surface).await?;
+
         let (device, queue): (Device, Queue) = Self::request_device(&adapter).await?;
         let config: WgtSurfaceConfiguration<Vec<TextureFormat>> =
             Self::build_surface_config(&window, &surface, &adapter, cfg.present_mode);
+
         surface.configure(&device, &config);
+        Self::log_adapter(&adapter);
 
         Ok(Self {
             device,
@@ -115,6 +145,19 @@ impl GpuDevice {
         instance.create_surface(window.clone()).map_err(RedixelError::from)
     }
 
+    /// Reports which GPU actually backs this session.
+    ///
+    /// Worth logging unconditionally: a software rasteriser (llvmpipe,
+    /// lavapipe) is selected silently when no hardware adapter is present, and
+    /// any timing measured against it says nothing about real hardware.
+    fn log_adapter(adapter: &Adapter) {
+        let info: AdapterInfo = adapter.get_info();
+        log::info!(
+            "GPU adapter: {}",
+            describe_adapter(&info.name, &info.driver, &info.driver_info, info.device_type, info.backend)
+        );
+    }
+
     async fn request_adapter(instance: &Instance, surface: &Surface<'static>) -> Result<Adapter, RedixelError> {
         instance
             .request_adapter(&RequestAdapterOptions {
@@ -175,5 +218,49 @@ impl GpuDevice {
             desired_maximum_frame_latency: 2,
             color_space: SurfaceColorSpace::Auto,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn describes_a_fully_populated_native_adapter() {
+        let described: String = describe_adapter(
+            "NVIDIA GeForce GTX 1660 Ti",
+            "NVIDIA",
+            "595.84",
+            DeviceType::DiscreteGpu,
+            Backend::Vulkan,
+        );
+
+        assert_eq!(
+            described,
+            "NVIDIA GeForce GTX 1660 Ti [DiscreteGpu / Vulkan] driver: NVIDIA 595.84"
+        );
+    }
+
+    #[test]
+    fn names_an_adapter_the_browser_refuses_to_identify() {
+        let described: String = describe_adapter("", "", "", DeviceType::Other, Backend::BrowserWebGpu);
+
+        assert_eq!(described, "unidentified adapter [Other / BrowserWebGpu]");
+    }
+
+    #[test]
+    fn drops_the_driver_clause_when_both_halves_are_blank() {
+        let described: String = describe_adapter("llvmpipe", "  ", "", DeviceType::Cpu, Backend::Vulkan);
+
+        assert_eq!(described, "llvmpipe [Cpu / Vulkan]");
+    }
+
+    #[test]
+    fn keeps_whichever_driver_half_is_present() {
+        let only_name: String = describe_adapter("a", "Mesa", "", DeviceType::Cpu, Backend::Gl);
+        let only_detail: String = describe_adapter("a", "", "25.0.1", DeviceType::Cpu, Backend::Gl);
+
+        assert_eq!(only_name, "a [Cpu / Gl] driver: Mesa");
+        assert_eq!(only_detail, "a [Cpu / Gl] driver: 25.0.1");
     }
 }

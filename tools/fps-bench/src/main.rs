@@ -6,6 +6,7 @@ mod bench {
             Arc, Mutex, MutexGuard,
             atomic::{AtomicU64, Ordering},
         },
+        time::{Duration, Instant},
     };
 
     use wgpu::{Backends, PresentMode};
@@ -14,8 +15,10 @@ mod bench {
     use redixel_platform::window::WindowConfig;
     use redixel_renderer::RendererConfig;
 
-    const WARMUP_FRAMES: u32 = 60;
-    const MEASURE_FRAMES: u32 = 300;
+    const WARMUP: Duration = Duration::from_millis(500);
+    const WARMUP_FRAMES: usize = 30;
+    const MEASURE_FRAMES: usize = 300;
+    const ROUNDS: usize = 3;
 
     const TIERS: [(usize, &str); 5] = [
         (100, "100 quads"),
@@ -49,9 +52,8 @@ mod bench {
         (ALLOC_COUNT.load(Ordering::Relaxed), ALLOC_BYTES.load(Ordering::Relaxed))
     }
 
-    struct TierResult {
-        quad_count: usize,
-        scene: &'static str,
+    /// One measured window for one tier.
+    struct Sample {
         avg_fps: f64,
         avg_frame_ms: f64,
         p95_frame_ms: f64,
@@ -59,17 +61,41 @@ mod bench {
         allocated_bytes: u64,
     }
 
+    /// A tier's samples reduced across rounds.
+    ///
+    /// Reports the median plus the observed range, because a single figure
+    /// cannot distinguish a regression from an outlier.
+    struct TierReport {
+        quad_count: usize,
+        scene: &'static str,
+        rounds: usize,
+        median_fps: f64,
+        fps_min: f64,
+        fps_max: f64,
+        spread_pct: f64,
+        median_frame_ms: f64,
+        median_p95_frame_ms: f64,
+        allocations: u64,
+        allocated_bytes: u64,
+    }
+
     struct FpsBenchmark {
-        tier_index: usize,
-        frame: u32,
+        schedule: Vec<usize>,
+        step: usize,
+        step_started: Option<Instant>,
+        warmup_frames: usize,
         samples: Vec<f64>,
         alloc_start: (u64, u64),
-        results: Arc<Mutex<Vec<TierResult>>>,
+        collected: Arc<Mutex<Vec<Vec<Sample>>>>,
     }
 
     impl FpsBenchmark {
+        fn tier_index(&self) -> usize {
+            self.schedule[self.step.min(self.schedule.len() - 1)]
+        }
+
         fn quad_count(&self) -> usize {
-            TIERS[self.tier_index].0
+            TIERS[self.tier_index()].0
         }
     }
 
@@ -84,47 +110,72 @@ mod bench {
         sorted[idx] * 1000.0
     }
 
+    fn median(values: &[f64]) -> f64 {
+        let mut sorted: Vec<f64> = values.to_vec();
+        sorted.sort_by(|a: &f64, b: &f64| a.total_cmp(b));
+
+        let mid: usize = sorted.len() / 2;
+        if sorted.len().is_multiple_of(2) {
+            (sorted[mid - 1] + sorted[mid]) / 2.0
+        } else {
+            sorted[mid]
+        }
+    }
+
+    fn median_u64(values: &[u64]) -> u64 {
+        let mut sorted: Vec<u64> = values.to_vec();
+        sorted.sort_unstable();
+
+        let mid: usize = sorted.len() / 2;
+        if sorted.len().is_multiple_of(2) {
+            sorted[mid - 1] + (sorted[mid] - sorted[mid - 1]) / 2
+        } else {
+            sorted[mid]
+        }
+    }
+
     impl Game for FpsBenchmark {
         type Action = ();
 
         fn on_start(&mut self, _ctx: &mut dyn GameContext<Self::Action>) {}
 
         fn on_update(&mut self, ctx: &mut dyn GameContext<Self::Action>) {
-            self.frame += 1;
+            let started: Instant = *self.step_started.get_or_insert_with(Instant::now);
 
-            if self.frame == WARMUP_FRAMES + 1 {
+            if started.elapsed() < WARMUP || self.warmup_frames < WARMUP_FRAMES {
+                self.warmup_frames += 1;
+                return;
+            }
+
+            if self.samples.is_empty() {
                 self.alloc_start = alloc_snapshot();
             }
 
-            if self.frame > WARMUP_FRAMES {
-                self.samples.push(ctx.delta_time());
+            self.samples.push(ctx.delta_time());
+
+            if self.samples.len() < MEASURE_FRAMES {
+                return;
             }
 
-            if self.frame >= WARMUP_FRAMES + MEASURE_FRAMES {
-                let (quad_count, scene): (usize, &str) = TIERS[self.tier_index];
-                let total_delta: f64 = self.samples.iter().sum();
-                let avg_fps: f64 = self.samples.len() as f64 / total_delta;
-                let avg_frame_ms: f64 = (total_delta / self.samples.len() as f64) * 1000.0;
-                let p95_frame_ms: f64 = percentile_ms(&self.samples, 0.95);
-                let (alloc_end_count, alloc_end_bytes): (u64, u64) = alloc_snapshot();
+            let tier: usize = self.tier_index();
+            let total_delta: f64 = self.samples.iter().sum();
+            let (alloc_count, alloc_bytes): (u64, u64) = alloc_snapshot();
 
-                self.results.lock().unwrap().push(TierResult {
-                    quad_count,
-                    scene,
-                    avg_fps: round2(avg_fps),
-                    avg_frame_ms: round2(avg_frame_ms),
-                    p95_frame_ms: round2(p95_frame_ms),
-                    allocations: alloc_end_count - self.alloc_start.0,
-                    allocated_bytes: alloc_end_bytes - self.alloc_start.1,
-                });
+            self.collected.lock().unwrap()[tier].push(Sample {
+                avg_fps: self.samples.len() as f64 / total_delta,
+                avg_frame_ms: (total_delta / self.samples.len() as f64) * 1000.0,
+                p95_frame_ms: percentile_ms(&self.samples, 0.95),
+                allocations: alloc_count - self.alloc_start.0,
+                allocated_bytes: alloc_bytes - self.alloc_start.1,
+            });
 
-                self.tier_index += 1;
-                self.frame = 0;
-                self.samples.clear();
+            self.samples.clear();
+            self.step_started = None;
+            self.warmup_frames = 0;
+            self.step += 1;
 
-                if self.tier_index >= TIERS.len() {
-                    ctx.exit();
-                }
+            if self.step >= self.schedule.len() {
+                ctx.exit();
             }
         }
 
@@ -143,23 +194,56 @@ mod bench {
         }
     }
 
-    fn marginal_ms_per_1000_quads(data: &[TierResult]) -> f64 {
-        let first: &TierResult = data.first().expect("fps-bench: no tiers recorded");
-        let last: &TierResult = data.last().expect("fps-bench: no tiers recorded");
+    fn reduce(tier: usize, samples: &[Sample]) -> TierReport {
+        let (quad_count, scene): (usize, &'static str) = TIERS[tier];
+
+        let fps: Vec<f64> = samples.iter().map(|s: &Sample| s.avg_fps).collect();
+        let frame_ms: Vec<f64> = samples.iter().map(|s: &Sample| s.avg_frame_ms).collect();
+        let p95_ms: Vec<f64> = samples.iter().map(|s: &Sample| s.p95_frame_ms).collect();
+        let allocations: Vec<u64> = samples.iter().map(|s: &Sample| s.allocations).collect();
+        let allocated_bytes: Vec<u64> = samples.iter().map(|s: &Sample| s.allocated_bytes).collect();
+
+        let median_fps: f64 = median(&fps);
+        let fps_min: f64 = fps.iter().copied().fold(f64::INFINITY, f64::min);
+        let fps_max: f64 = fps.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+
+        TierReport {
+            quad_count,
+            scene,
+            rounds: samples.len(),
+            median_fps: round2(median_fps),
+            fps_min: round2(fps_min),
+            fps_max: round2(fps_max),
+            spread_pct: (fps_max - fps_min) / median_fps * 100.0,
+            median_frame_ms: round2(median(&frame_ms)),
+            median_p95_frame_ms: round2(median(&p95_ms)),
+            allocations: median_u64(&allocations),
+            allocated_bytes: median_u64(&allocated_bytes),
+        }
+    }
+
+    fn marginal_ms_per_1000_quads(data: &[TierReport]) -> f64 {
+        let first: &TierReport = data.first().expect("fps-bench: no tiers recorded");
+        let last: &TierReport = data.last().expect("fps-bench: no tiers recorded");
         let quad_delta: f64 = (last.quad_count - first.quad_count) as f64;
-        (last.avg_frame_ms - first.avg_frame_ms) / (quad_delta / 1000.0)
+        (last.median_frame_ms - first.median_frame_ms) / (quad_delta / 1000.0)
     }
 
     pub fn main() {
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
-        let results: Arc<Mutex<Vec<TierResult>>> = Arc::new(Mutex::new(Vec::with_capacity(TIERS.len())));
+        let schedule: Vec<usize> = (0..ROUNDS).flat_map(|_| 0..TIERS.len()).collect();
+        let collected: Arc<Mutex<Vec<Vec<Sample>>>> =
+            Arc::new(Mutex::new((0..TIERS.len()).map(|_| Vec::with_capacity(ROUNDS)).collect()));
+
         let game: FpsBenchmark = FpsBenchmark {
-            tier_index: 0,
-            frame: 0,
-            samples: Vec::with_capacity(MEASURE_FRAMES as usize),
+            schedule,
+            step: 0,
+            step_started: None,
+            warmup_frames: 0,
+            samples: Vec::with_capacity(MEASURE_FRAMES),
             alloc_start: (0, 0),
-            results: results.clone(),
+            collected: collected.clone(),
         };
 
         let config: RuntimeConfig = RuntimeConfig::windowed(
@@ -182,27 +266,47 @@ mod bench {
             std::process::exit(1);
         }
 
-        let data: MutexGuard<'_, Vec<TierResult>> = results.lock().unwrap();
+        let samples: MutexGuard<'_, Vec<Vec<Sample>>> = collected.lock().unwrap();
+        let data: Vec<TierReport> = samples
+            .iter()
+            .enumerate()
+            .filter(|(_, s): &(usize, &Vec<Sample>)| !s.is_empty())
+            .map(|(tier, s): (usize, &Vec<Sample>)| reduce(tier, s))
+            .collect();
+
+        if data.is_empty() {
+            eprintln!("fps-bench: no tier completed a measurement window");
+            std::process::exit(1);
+        }
+
         let marginal_ms: f64 = round2(marginal_ms_per_1000_quads(&data));
 
         let tiers: Vec<serde_json::Value> = data
             .iter()
-            .map(|r: &TierResult| {
+            .map(|r: &TierReport| {
                 log::info!(
-                    "{}: {:.2} fps (avg {:.2} ms, p95 {:.2} ms, {} allocs / {} bytes)",
+                    "{}: {:.2} fps median over {} rounds (range {:.2}–{:.2}, spread {:.1}%, frame {:.2} ms, p95 {:.2} ms, {} allocs / {} bytes)",
                     r.scene,
-                    r.avg_fps,
-                    r.avg_frame_ms,
-                    r.p95_frame_ms,
+                    r.median_fps,
+                    r.rounds,
+                    r.fps_min,
+                    r.fps_max,
+                    r.spread_pct,
+                    r.median_frame_ms,
+                    r.median_p95_frame_ms,
                     r.allocations,
                     r.allocated_bytes
                 );
 
                 serde_json::json!({
                     "scene": r.scene,
-                    "avg_fps": format!("{:.2}", r.avg_fps),
-                    "avg_frame_ms": format!("{:.2}", r.avg_frame_ms),
-                    "p95_frame_ms": format!("{:.2}", r.p95_frame_ms),
+                    "rounds": r.rounds,
+                    "median_fps": format!("{:.2}", r.median_fps),
+                    "fps_min": format!("{:.2}", r.fps_min),
+                    "fps_max": format!("{:.2}", r.fps_max),
+                    "spread_pct": format!("{:.1}", r.spread_pct),
+                    "median_frame_ms": format!("{:.2}", r.median_frame_ms),
+                    "median_p95_frame_ms": format!("{:.2}", r.median_p95_frame_ms),
                     "allocations": r.allocations,
                     "allocated_bytes": r.allocated_bytes,
                 })
@@ -212,6 +316,10 @@ mod bench {
         log::info!("Marginal cost: {marginal_ms:.2} ms per 1000 additional quads");
 
         let output: serde_json::Value = serde_json::json!({
+            "rounds": ROUNDS,
+            "warmup_ms": WARMUP.as_millis(),
+            "warmup_frames": WARMUP_FRAMES,
+            "measure_frames": MEASURE_FRAMES,
             "tiers": tiers,
             "marginal_ms_per_1000_quads": format!("{:.2}", marginal_ms),
         });

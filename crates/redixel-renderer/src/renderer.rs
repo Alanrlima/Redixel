@@ -160,7 +160,9 @@ impl Renderer {
 
             pass.set_pipeline(&self.pipeline.pipeline);
             pass.set_bind_group(0, &self.pipeline.camera_bind_group, &[]);
-            self.queue.batch.flush(&self.device.queue, &mut pass);
+            self.queue
+                .batch
+                .flush(&self.device.device, &self.device.queue, &mut pass);
         }
 
         self.device.queue.submit(std::iter::once(encoder.finish()));

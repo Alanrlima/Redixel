@@ -425,14 +425,14 @@ impl Server {
                 self.effects.push(Effect {
                     kind: EffectKind::Hit,
                     pos: V2::of(hit_pos),
-                    color: (255, 50, 50),
+                    color: (255, 122, 122),
                 });
 
                 if dead {
                     self.effects.push(Effect {
                         kind: EffectKind::Death,
                         pos: V2::of(hit_pos),
-                        color: (255, 30, 30),
+                        color: (255, 96, 96),
                     });
                     self.agents[k].respawn();
                 }
@@ -459,7 +459,7 @@ impl Server {
                     self.effects.push(Effect {
                         kind: EffectKind::BulletImpact,
                         pos: V2::of(pos_i + Vec2::splat(size_i / 2.0)),
-                        color: (255, 255, 100),
+                        color: (255, 255, 168),
                     });
                     break;
                 }

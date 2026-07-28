@@ -222,9 +222,9 @@ pub fn rotate_vec(v: Vec2, angle: f32) -> Vec2 {
 pub fn weapon_color(weapon: Weapon) -> (u8, u8, u8) {
     match weapon {
         Weapon::Pistol => (255, 255, 0),
-        Weapon::Shotgun => (255, 165, 0),
-        Weapon::Flamethrower => (255, 70, 0),
-        Weapon::Homing => (50, 255, 255),
+        Weapon::Shotgun => (255, 210, 0),
+        Weapon::Flamethrower => (255, 143, 0),
+        Weapon::Homing => (122, 255, 255),
     }
 }
 
@@ -286,12 +286,12 @@ pub fn parse_cert_hash_hex(hex: &str) -> Option<[u8; 32]> {
 /// [`ClientId`] so every client renders the same player the same color.
 pub fn player_color(id: ClientId) -> (u8, u8, u8) {
     const PALETTE: [(u8, u8, u8); 6] = [
-        (50, 150, 255),
-        (80, 220, 100),
-        (255, 105, 180),
-        (60, 230, 230),
-        (255, 150, 40),
-        (180, 110, 255),
+        (122, 202, 255),
+        (152, 239, 168),
+        (255, 172, 219),
+        (133, 244, 244),
+        (255, 202, 110),
+        (219, 175, 255),
     ];
 
     PALETTE[(id % PALETTE.len() as u64) as usize]

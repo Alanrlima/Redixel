@@ -9,8 +9,8 @@ repository.workspace = true
 
 [dependencies]
 # Internal crates
-redixel-core = { workspace = true }
-redixel-math = { workspace = true }
+redixel-core = { workspace = true, features = ["wgpu"] }
+redixel-math = { workspace = true, features = ["wgpu"] }
 
 # External crates
 log = { workspace = true }
