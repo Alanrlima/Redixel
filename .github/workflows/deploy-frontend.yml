@@ -39,7 +39,7 @@ jobs:
       - name: Checkout Frontend Repository
         uses: actions/checkout@v4
         with:
-          repository: RedixelCoreTeam/RedixelWeb
+          repository: Redixel-Team/RedixelWeb
           token: ${{ secrets.FRONTEND_DEPLOY_TOKEN }}
           path: frontend-repo
 
