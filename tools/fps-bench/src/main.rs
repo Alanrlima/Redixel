@@ -16,6 +16,7 @@ mod bench {
     use redixel_renderer::RendererConfig;
 
     const WARMUP: Duration = Duration::from_millis(500);
+    const WARMUP_FRAMES: usize = 30;
     const MEASURE_FRAMES: usize = 300;
     const ROUNDS: usize = 3;
 
@@ -82,6 +83,7 @@ mod bench {
         schedule: Vec<usize>,
         step: usize,
         step_started: Option<Instant>,
+        warmup_frames: usize,
         samples: Vec<f64>,
         alloc_start: (u64, u64),
         collected: Arc<Mutex<Vec<Vec<Sample>>>>,
@@ -123,7 +125,13 @@ mod bench {
     fn median_u64(values: &[u64]) -> u64 {
         let mut sorted: Vec<u64> = values.to_vec();
         sorted.sort_unstable();
-        sorted[sorted.len() / 2]
+
+        let mid: usize = sorted.len() / 2;
+        if sorted.len().is_multiple_of(2) {
+            sorted[mid - 1] + (sorted[mid] - sorted[mid - 1]) / 2
+        } else {
+            sorted[mid]
+        }
     }
 
     impl Game for FpsBenchmark {
@@ -134,7 +142,8 @@ mod bench {
         fn on_update(&mut self, ctx: &mut dyn GameContext<Self::Action>) {
             let started: Instant = *self.step_started.get_or_insert_with(Instant::now);
 
-            if started.elapsed() < WARMUP {
+            if started.elapsed() < WARMUP || self.warmup_frames < WARMUP_FRAMES {
+                self.warmup_frames += 1;
                 return;
             }
 
@@ -162,6 +171,7 @@ mod bench {
 
             self.samples.clear();
             self.step_started = None;
+            self.warmup_frames = 0;
             self.step += 1;
 
             if self.step >= self.schedule.len() {
@@ -204,7 +214,7 @@ mod bench {
             median_fps: round2(median_fps),
             fps_min: round2(fps_min),
             fps_max: round2(fps_max),
-            spread_pct: round2((fps_max - fps_min) / median_fps * 100.0),
+            spread_pct: (fps_max - fps_min) / median_fps * 100.0,
             median_frame_ms: round2(median(&frame_ms)),
             median_p95_frame_ms: round2(median(&p95_ms)),
             allocations: median_u64(&allocations),
@@ -230,6 +240,7 @@ mod bench {
             schedule,
             step: 0,
             step_started: None,
+            warmup_frames: 0,
             samples: Vec::with_capacity(MEASURE_FRAMES),
             alloc_start: (0, 0),
             collected: collected.clone(),
@@ -307,6 +318,7 @@ mod bench {
         let output: serde_json::Value = serde_json::json!({
             "rounds": ROUNDS,
             "warmup_ms": WARMUP.as_millis(),
+            "warmup_frames": WARMUP_FRAMES,
             "measure_frames": MEASURE_FRAMES,
             "tiers": tiers,
             "marginal_ms_per_1000_quads": format!("{:.2}", marginal_ms),
