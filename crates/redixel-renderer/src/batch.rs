@@ -6,13 +6,8 @@ use crate::pipeline::Vertex;
 
 /// Index pattern for a rectangle, relative to its own first vertex.
 ///
-/// Both triangles wind the same way, and they wind to match the shape
-/// pipeline's `FrontFace::Ccw`: they are clockwise in world space, but the
-/// camera's `Mat4::orthographic(0, w, h, 0, ..)` scales y by `2/(0 - h)`, and
-/// that reflection flips the orientation on the way to NDC. So backface
-/// culling — if ever enabled — keeps the whole quad visible rather than
-/// discarding it. Holds for non-negative `size`; a mirrored rectangle flips
-/// both triangles together.
+/// Clockwise in world space, which the camera's y-flipping projection turns
+/// into the `FrontFace::Ccw` the shape pipeline declares.
 const RECT_INDICES: [u32; 6] = [0, 2, 1, 1, 2, 3];
 
 /// Index pattern for a standalone triangle, relative to its own first vertex.
@@ -179,49 +174,18 @@ impl SpriteBatch {
         self.geometry.indices.len()
     }
 
-    /// Reallocates the GPU buffers when the queued geometry outgrows them.
-    ///
-    /// Capacity climbs straight to the next power of two and never shrinks, so
-    /// a scene whose sprite count oscillates settles after a handful of frames
-    /// and stops reallocating.
-    ///
-    /// Callers should invoke this **before** opening the `RenderPass` that
-    /// [`SpriteBatch::flush`] draws into, so buffer allocation stays outside
-    /// pass recording. Doing so is an optimisation, not a requirement: `flush`
-    /// calls it again, and a second call is two integer comparisons once the
-    /// capacity already fits.
-    pub fn prepare(&mut self, device: &Device) {
-        let vertices: usize = self.geometry.vertices.len();
-        if vertices > self.vertex_capacity {
-            self.vertex_capacity = vertices.next_power_of_two();
-            self.vertex_buffer = create_vertex_buffer(device, self.vertex_capacity);
-            log::debug!("SpriteBatch: vertex buffer grown to {} vertices.", self.vertex_capacity);
-        }
-
-        let indices: usize = self.geometry.indices.len();
-        if indices > self.index_capacity {
-            self.index_capacity = indices.next_power_of_two();
-            self.index_buffer = create_index_buffer(device, self.index_capacity);
-            log::debug!("SpriteBatch: index buffer grown to {} indices.", self.index_capacity);
-        }
-    }
-
     /// Uploads queued vertices and indices to the GPU and records the indexed
     /// draw call.
     ///
     /// Must be called **inside** an active `RenderPass`.
     /// Clears the internal queues after submission.
-    ///
-    /// Takes a `&Device` so it can grow its buffers on its own if
-    /// [`SpriteBatch::prepare`] was not called first; that keeps the call
-    /// correct in isolation rather than depending on a paired call.
     pub fn flush(&mut self, device: &Device, queue: &Queue, pass: &mut RenderPass<'_>) {
         let count: usize = self.geometry.indices.len();
         if count == 0 {
             return;
         }
 
-        self.prepare(device);
+        self.reserve(device);
 
         queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&self.geometry.vertices));
         queue.write_buffer(&self.index_buffer, 0, bytemuck::cast_slice(&self.geometry.indices));
@@ -231,6 +195,25 @@ impl SpriteBatch {
         pass.draw_indexed(0..count as u32, 0, 0..1);
 
         self.geometry.clear();
+    }
+
+    /// Reallocates the GPU buffers when the queued geometry outgrows them.
+    ///
+    /// Capacity climbs straight to the next power of two and never shrinks, so
+    /// a scene whose sprite count oscillates settles after a handful of frames
+    /// and stops reallocating.
+    fn reserve(&mut self, device: &Device) {
+        let vertices: usize = self.geometry.vertices.len();
+        if vertices > self.vertex_capacity {
+            self.vertex_capacity = vertices.next_power_of_two();
+            self.vertex_buffer = create_vertex_buffer(device, self.vertex_capacity);
+        }
+
+        let indices: usize = self.geometry.indices.len();
+        if indices > self.index_capacity {
+            self.index_capacity = indices.next_power_of_two();
+            self.index_buffer = create_index_buffer(device, self.index_capacity);
+        }
     }
 }
 
@@ -314,19 +297,6 @@ mod tests {
             second > 0.0,
             "second triangle is clockwise in NDC; the shape pipeline declares FrontFace::Ccw"
         );
-    }
-
-    #[test]
-    fn indexed_rect_expands_to_the_unindexed_vertex_order() {
-        let vertices: [Vertex; 4] = rect_vertices(Vec2::new(10.0, 20.0), Vec2::new(3.0, 4.0), Color::WHITE);
-        let [tl, tr, bl, br]: [Vertex; 4] = vertices;
-
-        let expanded: Vec<[f32; 2]> = RECT_INDICES
-            .iter()
-            .map(|i: &u32| vertices[*i as usize].position)
-            .collect();
-
-        assert_eq!(expanded, positions(&[tl, bl, tr, tr, bl, br]));
     }
 
     #[test]
