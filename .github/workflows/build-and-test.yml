@@ -295,7 +295,7 @@ jobs:
             echo "</tbody>"
             echo "</table>"
             echo
-            echo "<p align=\"center\"><sub>Median of $(jq -r '.rounds' benchmark_result.json) rounds per tier, $(jq -r '.measure_frames' benchmark_result.json) frames each after $(jq -r '.warmup_ms' benchmark_result.json) ms warmup, tiers interleaved · Marginal cost: <strong>$(jq -r '.marginal_ms_per_1000_quads' benchmark_result.json) ms</strong> per 1000 additional quads · <strong>Spread is how far apart identical runs landed — treat any FPS delta below it as noise</strong> · allocations are deterministic and the most reliable column here.</sub></p>"
+            echo "<p align=\"center\"><sub>Median of $(jq -r '.rounds' benchmark_result.json) rounds per tier, $(jq -r '.measure_frames' benchmark_result.json) frames each after a warmup of at least $(jq -r '.warmup_ms' benchmark_result.json) ms and $(jq -r '.warmup_frames' benchmark_result.json) frames, tiers interleaved · Marginal cost: <strong>$(jq -r '.marginal_ms_per_1000_quads' benchmark_result.json) ms</strong> per 1000 additional quads · <strong>Spread is how far apart identical runs landed — treat any FPS delta below it as noise</strong> · allocations are deterministic and the most reliable column here.</sub></p>"
           } > benchmark_summary.md
 
       - name: Show Results in Job Summary
