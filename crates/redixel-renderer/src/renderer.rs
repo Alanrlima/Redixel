@@ -119,9 +119,10 @@ impl Renderer {
     /// Flushes all queued draw calls and presents the frame.
     ///
     /// 1. Uploads the orthographic camera matrix
-    /// 2. Begins the render pass (clear)
-    /// 3. Flushes the sprite batch (one draw call)
-    /// 4. Submits commands and presents
+    /// 2. Grows the sprite batch buffers to fit the frame, before the pass opens
+    /// 3. Begins the render pass (clear)
+    /// 4. Flushes the sprite batch (one draw call)
+    /// 5. Submits commands and presents
     pub fn render(&mut self) -> Result<(), RedixelError> {
         let Some(surface) = &self.device.surface else {
             return Ok(());
@@ -137,6 +138,8 @@ impl Renderer {
         let mut encoder: CommandEncoder = self.device.device.create_command_encoder(&CommandEncoderDescriptor {
             label: Some("REDIXEL_ENCODER"),
         });
+
+        self.queue.batch.prepare(&self.device.device);
 
         {
             let clear: wgpu::Color = self.queue.clear.into();
