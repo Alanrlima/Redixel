@@ -274,7 +274,7 @@ dependencies = [
 
 [[package]]
 name = "builder"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -648,7 +648,7 @@ dependencies = [
 
 [[package]]
 name = "fps-bench"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "env_logger",
  "log",
@@ -1828,7 +1828,7 @@ dependencies = [
 
 [[package]]
 name = "redixel"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "redixel-core",
  "redixel-math",
@@ -1841,7 +1841,7 @@ dependencies = [
 
 [[package]]
 name = "redixel-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "log",
  "redixel-math",
@@ -1854,14 +1854,14 @@ dependencies = [
 
 [[package]]
 name = "redixel-math"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "wgpu",
 ]
 
 [[package]]
 name = "redixel-net"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bytes",
  "js-sys",
@@ -1876,7 +1876,7 @@ dependencies = [
 
 [[package]]
 name = "redixel-platform"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "log",
  "redixel-core",
@@ -1888,7 +1888,7 @@ dependencies = [
 
 [[package]]
 name = "redixel-renderer"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bytemuck",
  "log",
@@ -1900,7 +1900,7 @@ dependencies = [
 
 [[package]]
 name = "redixel-runtime"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "log",
  "pollster",
