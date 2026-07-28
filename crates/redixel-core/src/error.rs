@@ -11,20 +11,25 @@ use wgpu::rwh::HandleError;
 use wasm_bindgen::JsValue;
 
 #[derive(Error, Debug)]
+#[non_exhaustive]
 pub enum RedixelError {
     #[cfg(feature = "wgpu")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "wgpu")))]
     #[error("Failed to create rendering surface: {0}")]
     CreateSurface(#[from] CreateSurfaceError),
 
     #[cfg(all(target_os = "windows", feature = "wgpu"))]
+    #[cfg_attr(docsrs, doc(cfg(all(target_os = "windows", feature = "wgpu"))))]
     #[error("Failed to acquire raw window handle: {0}")]
     WindowHandle(#[from] HandleError),
 
     #[cfg(feature = "wgpu")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "wgpu")))]
     #[error("Failed to find a suitable graphics adapter: {0}")]
     RequestAdapter(#[from] RequestAdapterError),
 
     #[cfg(feature = "wgpu")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "wgpu")))]
     #[error("Failed to create graphics device: {0}")]
     RequestDevice(#[from] RequestDeviceError),
 
