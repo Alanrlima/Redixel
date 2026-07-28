@@ -10,14 +10,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Added
 
 - **Renderer:** `SpriteBatch::index_count()` and `unique_vertex_count()` — the draw call size and the number of distinct vertices, which indexed drawing makes two different figures.
-- **Renderer:** `SpriteBatch::prepare()`, which grows the GPU buffers to fit the queued geometry ahead of the render pass, keeping allocation out of pass recording.
 - **Renderer:** the selected GPU adapter is logged at startup, making it visible whether a session ran on hardware or on a software rasteriser. Browsers withhold adapter identity to limit fingerprinting, so the fields WebGPU leaves blank are substituted or omitted rather than logged as empty text.
 - **Math:** `Color::srgb()`/`Color::srgba()`, the float counterparts to `from_rgba8()`, and `Color::to_rgba8()`, its inverse.
 
 ### Changed
 
 - **Renderer:** `SpriteBatch` submits indexed draw calls (`pass.draw_indexed`) — 4 unique vertices + 6 `u32` indices per quad, instead of 6 duplicated vertices.
-- **Renderer:** `SpriteBatch` no longer caps how much geometry a frame may queue, replacing the fixed `MAX_QUADS` ceiling that silently dropped excess rectangles and triangles. Buffers start empty, grow to fit whatever is drawn, never shrink, and log growth at `debug` level.
+- **Renderer:** `SpriteBatch` no longer caps how much geometry a frame may queue, replacing the fixed `MAX_QUADS` ceiling that silently dropped excess rectangles and triangles. Buffers start empty, grow to fit whatever is drawn, and never shrink.
 - **Renderer:** `SpriteBatch::flush()` takes a `&Device` alongside the `&Queue`, and `vertex_count()` is gone in favour of `unique_vertex_count()` — the figure changed from 6 values per quad to 4, so the rename turns a silent behaviour break into a compile error.
 - **Math:** `wgpu` is optional, behind a `wgpu` feature carrying the `From<Color> for wgpu::Color` conversion. Without it the crate has no dependencies at all, against 59 with it.
 - **Core:** `wgpu` is optional, behind a `wgpu` feature carrying the four error variants that wrap `wgpu` failure types. Without it the crate resolves 78 dependencies instead of 118, so the `Game`, input, and networking surface no longer forces a graphics API on consumers that do not render. `RedixelError` is `#[non_exhaustive]`, since which variants exist depends on a feature Cargo unifies across the whole dependency graph.
