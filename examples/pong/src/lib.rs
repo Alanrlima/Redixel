@@ -215,7 +215,7 @@ impl Game for Pong {
             ctx.draw_rect(
                 Vec2::new(w / 2.0 - 2.0, y),
                 Vec2::new(4.0, 10.0),
-                Color::from_rgba8(70, 70, 70, 255),
+                Color::from_rgba8(143, 143, 143, 255),
             );
 
             y += 18.0;
@@ -226,7 +226,7 @@ impl Game for Pong {
         ctx.draw_rect(
             self.right.pos,
             Vec2::new(PADDLE_W, PADDLE_H),
-            Color::from_rgba8(220, 100, 100, 255),
+            Color::from_rgba8(239, 168, 168, 255),
         );
 
         ctx.draw_rect(self.ball.pos, Vec2::new(BALL_SIZE, BALL_SIZE), Color::YELLOW);

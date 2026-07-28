@@ -290,7 +290,7 @@ impl Client {
 
         for agent in snapshot.agents.iter() {
             let color: (u8, u8, u8) = if agent.rapid_fire {
-                (255, 200, 50)
+                (255, 229, 122)
             } else {
                 player_color(agent.owner)
             };
@@ -665,7 +665,7 @@ impl Client {
             let (r, g, b): (u8, u8, u8) = player_color(agent.owner);
 
             let body: Color = if agent.rapid_fire {
-                Color::from_rgba8(255, 200, 50, 255)
+                Color::from_rgba8(255, 229, 122, 255)
             } else {
                 Color::from_rgba8(r, g, b, 255)
             };
@@ -770,7 +770,7 @@ impl Game for Client {
                 for agent in world.agents.iter() {
                     if agent.dashing {
                         let color: (u8, u8, u8) = if agent.rapid_fire {
-                            (255, 200, 50)
+                            (255, 229, 122)
                         } else {
                             player_color(agent.owner)
                         };
@@ -866,7 +866,7 @@ impl Game for Client {
                 ctx.draw_rect(
                     to_screen(center),
                     Vec2::splat(size * scale),
-                    Color::from_rgba8(80, 80, 120, (pulse * 200.0) as u8),
+                    Color::from_rgba8(152, 152, 182, (pulse * 200.0) as u8),
                 );
 
                 return;
