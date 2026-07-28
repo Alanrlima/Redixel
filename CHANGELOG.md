@@ -7,9 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [0.4.0]
 
+### Added
+
+- **Renderer:** `SpriteBatch::index_count()`, the number of indices the next `flush()` will submit. `vertex_count()` stays the count of unique vertices, which for indexed drawing is no longer the size of the draw call.
+- **Renderer:** the selected GPU adapter is logged at startup, so it is always visible whether a session ran on hardware or on a software rasteriser. Browsers withhold adapter identity to limit fingerprinting, so the fields WebGPU leaves blank are substituted or omitted rather than logged as empty text.
+- **Math:** `Color::srgb()` and `Color::srgba()`, the float counterparts to `from_rgba8()`. `Color::srgb(0.5, 0.5, 0.5)` and `Color::from_rgba8(128, 128, 128, 255)` now describe the same colour, whereas `Color::rgb()` still takes components that are already linear.
+- **Math:** `Color::to_rgba8()`, the sRGB-encoding inverse of `from_rgba8()`.
+
 ### Changed
 
-- **Renderer:** `SpriteBatch` now submits indexed draw calls (`pass.draw_indexed`) instead of raw vertex lists — quads upload 4 unique vertices + 6 `u16` indices instead of 6 duplicated vertices per quad.
+- **Renderer:** `SpriteBatch` now submits indexed draw calls (`pass.draw_indexed`) instead of raw vertex lists — quads upload 4 unique vertices + 6 `u32` indices instead of 6 duplicated vertices per quad.
+- **Renderer:** `SpriteBatch` no longer caps how much geometry a frame may queue, and no longer reserves memory up front. Its buffers start empty and grow to fit whatever is drawn, replacing the fixed `MAX_QUADS` ceiling that silently dropped excess rectangles and triangles.
+- **Renderer:** `SpriteBatch::flush` now takes a `&Device` alongside the `&Queue`, so it can reallocate its buffers when the queued geometry outgrows them.
+- **Math:** `wgpu` is now optional, gated behind a `wgpu` feature carrying the `From<Color> for wgpu::Color` conversion. `redixel-renderer` enables it, so `.into()` keeps working; without it the crate has no dependencies at all, down from 145.
+- **Core:** `wgpu` is now optional, gated behind a `wgpu` feature alongside the four error variants that wrap `wgpu` failure types. Without it the crate resolves 202 crates instead of 332, so the `Game`, input, and networking surface no longer forces a graphics API on consumers that do not render.
+- **Examples:** the `pong`, `shooter`, and `shooter_mp` palettes were re-authored in sRGB. The rendered result is unchanged — every value was replaced with the colour that was already reaching the screen — but the numbers in the source now match the on-screen pixels. Converted at each origin rather than at the draw calls, so colours travelling through particle systems or over the wire stay consistent.
+- **`tools/fps-bench`:** each tier is measured over several interleaved rounds and reported as a median with its observed range and spread, instead of one figure per tier. Warmup is wall-clock rather than frame-counted, since a frame budget warms up for less time the faster the machine.
+- **CI:** the benchmark comment reports the measured spread, making it visible when an FPS delta is smaller than the run-to-run noise. The job timeout rises to 15 minutes to fit the added rounds.
+
+### Fixed
+
+- **Math:** `Color::from_rgba8()` and `Color::from_hex()` treated 8-bit and hex inputs as linear, but such values are sRGB-encoded by convention. They now apply the sRGB transfer function, so a colour authored as `#FF8000` renders as `#FF8000` instead of roughly `#FFBC00`, and alpha is correctly left un-encoded. The named constants are unaffected, sitting at the extremes where both spaces coincide.
+- **Math:** the `Color` documentation claimed gamma correction happened "at the shader level". The shape shader applies none, and must not: the renderer selects an sRGB surface format and the GPU performs the encoding on write.
 
 ## [0.3.0]
 
