@@ -7,6 +7,9 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
+[features]
+wgpu = ["dep:wgpu"]
+
 [dependencies]
 # Internal crates
 redixel-math = { workspace = true }
@@ -14,7 +17,7 @@ redixel-math = { workspace = true }
 # External crates
 log = { workspace = true }
 thiserror = { workspace = true }
-wgpu = { workspace = true }
+wgpu = { workspace = true, optional = true }
 winit = { workspace = true }
 serde_json = { workspace = true }
 
