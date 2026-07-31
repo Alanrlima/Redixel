@@ -1,6 +1,6 @@
 use redixel::prelude::*;
 
-type Face = (f32, (f32, f32, f32), (f32, f32, f32), (f32, f32, f32), Color);
+const CAMERA_DISTANCE: f32 = 3.0;
 
 struct Triangle3d {
     rotation: f32,
@@ -13,7 +13,7 @@ impl Default for Triangle3d {
 }
 
 impl Triangle3d {
-    fn rotate(x: f32, y: f32, z: f32, angle: f32) -> (f32, f32, f32) {
+    fn rotate(x: f32, y: f32, z: f32, angle: f32) -> Vec3 {
         let rx: f32 = x * angle.cos() - z * angle.sin();
         let rz: f32 = x * angle.sin() + z * angle.cos();
 
@@ -21,13 +21,7 @@ impl Triangle3d {
         let ry: f32 = y * tilt.cos() - rz * tilt.sin();
         let rz_final: f32 = y * tilt.sin() + rz * tilt.cos();
 
-        (rx, ry, rz_final)
-    }
-
-    fn project(x: f32, y: f32, z: f32, center: Vec2, scale: f32) -> Vec2 {
-        let distance: f32 = 2.5;
-        let z_perspective: f32 = distance + z;
-        center + (Vec2::new(x, y) / z_perspective) * scale
+        Vec3::new(rx, -ry, rz_final)
     }
 }
 
@@ -46,11 +40,6 @@ impl Game for Triangle3d {
     fn on_render(&mut self, ctx: &mut dyn GameContext<Self::Action>) {
         ctx.clear_color(Color::rgb(0.1, 0.1, 0.12));
 
-        let h: f32 = ctx.surface_height() as f32;
-        let w: f32 = ctx.surface_width() as f32;
-
-        let scale: f32 = w.min(h) * 0.40;
-        let center: Vec2 = Vec2::new(w / 2.0, h / 2.0);
         let vertices: [(f32, f32, f32); 4] = [(0.0, -0.8, 0.0), (-0.8, 0.6, 0.5), (0.8, 0.6, 0.5), (0.0, 0.6, -0.8)];
 
         let faces: [(usize, usize, usize, Color); 4] = [
@@ -60,28 +49,15 @@ impl Game for Triangle3d {
             (1, 3, 2, Color::rgb(0.8, 0.8, 0.1)),
         ];
 
-        let rotated_vertices: Vec<(f32, f32, f32)> = vertices
+        let rotated: Vec<Vec3> = vertices
             .iter()
-            .map(|v: &(f32, f32, f32)| Self::rotate(v.0, v.1, v.2, self.rotation))
+            .map(|v: &(f32, f32, f32)| {
+                Self::rotate(v.0, v.1, v.2, self.rotation) + Vec3::new(0.0, 0.0, CAMERA_DISTANCE)
+            })
             .collect();
 
-        let mut faces_to_draw: Vec<Face> = Vec::new();
-
         for (i1, i2, i3, color) in faces.iter() {
-            let v1: (f32, f32, f32) = rotated_vertices[*i1];
-            let v2: (f32, f32, f32) = rotated_vertices[*i2];
-            let v3: (f32, f32, f32) = rotated_vertices[*i3];
-            let avg_z: f32 = (v1.2 + v2.2 + v3.2) / 3.0;
-            faces_to_draw.push((avg_z, v1, v2, v3, *color));
-        }
-
-        faces_to_draw.sort_by(|a: &Face, b: &Face| b.0.partial_cmp(&a.0).unwrap());
-
-        for (_, v1, v2, v3, color) in faces_to_draw {
-            let p1: Vec2 = Self::project(v1.0, v1.1, v1.2, center, scale);
-            let p2: Vec2 = Self::project(v2.0, v2.1, v2.2, center, scale);
-            let p3: Vec2 = Self::project(v3.0, v3.1, v3.2, center, scale);
-            ctx.draw_triangle(p1, p2, p3, color);
+            ctx.draw_triangle_3d(rotated[*i1], rotated[*i2], rotated[*i3], *color);
         }
     }
 }
