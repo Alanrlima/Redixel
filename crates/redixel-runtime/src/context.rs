@@ -9,6 +9,7 @@ use redixel_platform::InputManager;
 
 /// A draw command buffered during `on_render` and flushed by the runtime.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum DrawCommand {
     ClearColor(Color),
     Rect { position: Vec2, size: Vec2, color: Color },
