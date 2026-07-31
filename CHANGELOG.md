@@ -11,11 +11,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - **Renderer:** `SpriteBatch::index_count()` and `unique_vertex_count()` — the draw call size and the number of distinct vertices, which indexed drawing makes two different figures.
 - **Renderer:** the selected GPU adapter is logged at startup, making it visible whether a session ran on hardware or on a software rasteriser. Browsers withhold adapter identity to limit fingerprinting, so the fields WebGPU leaves blank are substituted or omitted rather than logged as empty text.
+- **Renderer:** a GPU depth buffer — a `wgpu::Texture` (`Depth32Float`) and its `TextureView`, recreated alongside the swap chain on every resize. The shared render pipeline now runs a real depth test (`depth_write_enabled: true`, `depth_compare: LessEqual`) instead of relying on CPU draw order, so 3D geometry is occluded by the GPU rather than sorted by hand.
+- **Renderer:** `GameContext::draw_triangle_3d` / `Renderer::draw_triangle_3d` — a second per-frame batch with its own perspective camera uniform, bound and flushed independently of the existing 2D orthographic batch within the same render pass.
+- **Math:** `Mat4::perspective(fov_y_radians, aspect, near, far)`, a left-handed perspective projection (camera at the origin looking down `+Z`) using the same `[0, 1]` WGPU depth-range convention as `orthographic`.
+- **Math:** `Vec3` — a 3-component float vector mirroring `Vec2`'s arithmetic, `dot`, `length`, and `normalise`.
 - **Math:** `Color::srgb()`/`Color::srgba()`, the float counterparts to `from_rgba8()`, and `Color::to_rgba8()`, its inverse.
 
 ### Changed
 
 - **Renderer:** `SpriteBatch` submits indexed draw calls (`pass.draw_indexed`) — 4 unique vertices + 6 `u32` indices per quad, instead of 6 duplicated vertices.
+- **Renderer:** `Vertex.position` grew from `[f32; 2]` to `[f32; 3]`, and the shape shader now reads a real `vec3<f32>` position instead of hardcoding `z = 0.0` — the depth test needs something to compare. `draw_rect`/`draw_triangle` are unaffected; they still take `Vec2` and now just carry `z = 0.0` through to the GPU.
+- **Examples:** `triangle_3d` sends real 3D vertices through `draw_triangle_3d` instead of manually perspective-dividing to `Vec2` and back-to-front sorting faces on the CPU — the rotating tetrahedron is now occluded by the GPU depth test.
 - **Renderer:** `SpriteBatch` no longer caps how much geometry a frame may queue, replacing the fixed `MAX_QUADS` ceiling that silently dropped excess rectangles and triangles. Buffers start empty, grow to fit whatever is drawn, and never shrink.
 - **Renderer:** `SpriteBatch::flush()` takes a `&Device` alongside the `&Queue`, and `vertex_count()` is gone in favour of `unique_vertex_count()` — the figure changed from 6 values per quad to 4, so the rename turns a silent behaviour break into a compile error.
 - **Math:** `wgpu` is optional, behind a `wgpu` feature carrying the `From<Color> for wgpu::Color` conversion. Without it the crate has no dependencies at all, against 59 with it.
