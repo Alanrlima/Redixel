@@ -22,8 +22,22 @@ impl Vec3 {
     }
 
     #[inline]
+    pub const fn splat(v: f32) -> Self {
+        Self { x: v, y: v, z: v }
+    }
+
+    #[inline]
     pub fn dot(self, other: Self) -> f32 {
         self.x * other.x + self.y * other.y + self.z * other.z
+    }
+
+    #[inline]
+    pub fn cross(self, other: Self) -> Self {
+        Self::new(
+            self.y * other.z - self.z * other.y,
+            self.z * other.x - self.x * other.z,
+            self.x * other.y - self.y * other.x,
+        )
     }
 
     #[inline]
@@ -40,6 +54,26 @@ impl Vec3 {
     pub fn normalise(self) -> Self {
         let len: f32 = self.length();
         if len > f32::EPSILON { self / len } else { Self::ZERO }
+    }
+
+    #[inline]
+    pub fn abs(self) -> Self {
+        Self::new(self.x.abs(), self.y.abs(), self.z.abs())
+    }
+
+    #[inline]
+    pub fn min(self, other: Self) -> Self {
+        Self::new(self.x.min(other.x), self.y.min(other.y), self.z.min(other.z))
+    }
+
+    #[inline]
+    pub fn max(self, other: Self) -> Self {
+        Self::new(self.x.max(other.x), self.y.max(other.y), self.z.max(other.z))
+    }
+
+    #[inline]
+    pub fn lerp(self, other: Self, t: f32) -> Self {
+        self + (other - self) * t
     }
 
     #[inline]
@@ -166,5 +200,52 @@ mod tests {
     fn dot() {
         assert!((Vec3::X.dot(Vec3::Y)).abs() < EPS);
         assert!((Vec3::X.dot(Vec3::X) - 1.0).abs() < EPS);
+    }
+
+    #[test]
+    fn cross_follows_the_right_hand_rule() {
+        assert_eq!(Vec3::X.cross(Vec3::Y), Vec3::Z);
+        assert_eq!(Vec3::Y.cross(Vec3::Z), Vec3::X);
+        assert_eq!(Vec3::Z.cross(Vec3::X), Vec3::Y);
+    }
+
+    #[test]
+    fn cross_is_anticommutative_and_vanishes_on_parallel_vectors() {
+        let a: Vec3 = Vec3::new(1.0, 2.0, 3.0);
+        let b: Vec3 = Vec3::new(-4.0, 5.0, 6.0);
+
+        assert_eq!(a.cross(b), -b.cross(a));
+        assert_eq!(a.cross(a), Vec3::ZERO);
+        assert_eq!(a.cross(a * 2.0), Vec3::ZERO);
+    }
+
+    #[test]
+    fn cross_is_perpendicular_to_both_operands() {
+        let a: Vec3 = Vec3::new(1.0, 2.0, 3.0);
+        let b: Vec3 = Vec3::new(-4.0, 5.0, 6.0);
+        let n: Vec3 = a.cross(b);
+
+        assert!(n.dot(a).abs() < EPS);
+        assert!(n.dot(b).abs() < EPS);
+    }
+
+    #[test]
+    fn splat_abs_min_max() {
+        assert_eq!(Vec3::splat(2.0), Vec3::new(2.0, 2.0, 2.0));
+        assert_eq!(Vec3::new(-1.0, 2.0, -3.0).abs(), Vec3::new(1.0, 2.0, 3.0));
+
+        let a: Vec3 = Vec3::new(1.0, 5.0, -2.0);
+        let b: Vec3 = Vec3::new(4.0, 2.0, 0.0);
+        assert_eq!(a.min(b), Vec3::new(1.0, 2.0, -2.0));
+        assert_eq!(a.max(b), Vec3::new(4.0, 5.0, 0.0));
+    }
+
+    #[test]
+    fn lerp() {
+        let a: Vec3 = Vec3::ZERO;
+        let b: Vec3 = Vec3::new(10.0, 10.0, 10.0);
+        assert_eq!(a.lerp(b, 0.5), Vec3::new(5.0, 5.0, 5.0));
+        assert_eq!(a.lerp(b, 0.0), a);
+        assert_eq!(a.lerp(b, 1.0), b);
     }
 }
