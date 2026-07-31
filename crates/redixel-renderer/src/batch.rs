@@ -65,22 +65,21 @@ fn triangle_vertices(p1: Vec2, p2: Vec2, p3: Vec2, color: Color) -> [Vertex; 3] 
 
 /// Builds the three corners of a 3D triangle in the order they were given.
 ///
-/// Unlike `triangle_vertices`, the caller supplies a real z — this is the
-/// only vertex-building path whose depth isn't hardcoded to zero.
+/// The only vertex-building path whose depth isn't hardcoded to zero.
 fn triangle_vertices_3d(p1: Vec3, p2: Vec3, p3: Vec3, color: Color) -> [Vertex; 3] {
     let c: [f32; 4] = color.to_array();
 
     [
         Vertex {
-            position: [p1.x, p1.y, p1.z],
+            position: p1.to_array(),
             color: c,
         },
         Vertex {
-            position: [p2.x, p2.y, p2.z],
+            position: p2.to_array(),
             color: c,
         },
         Vertex {
-            position: [p3.x, p3.y, p3.z],
+            position: p3.to_array(),
             color: c,
         },
     ]
@@ -132,16 +131,16 @@ fn create_index_buffer(device: &Device, indices: usize) -> Buffer {
     })
 }
 
-/// Accumulates `draw_rect` calls per frame and submits them to the GPU in a
-/// single indexed draw call on `flush()`.
+/// The GPU-side half of a batch: the buffers queued geometry is uploaded into,
+/// and the indexed draw call that submits it.
 ///
-/// This is the standard 2D batch-rendering pattern: minimise draw calls by
-/// grouping same-pipeline geometry together.
+/// Shared by [`SpriteBatch`] and [`MeshBatch`], which accumulate the same
+/// `Vertex` type and differ only in which primitives they accept.
 ///
-/// The batch imposes no ceiling on how much geometry a frame may queue, and
-/// reserves nothing up front: its buffers start empty and grow to fit whatever
-/// is actually drawn, so nothing is ever silently dropped.
-pub struct SpriteBatch {
+/// Imposes no ceiling on how much geometry a frame may queue, and reserves
+/// nothing up front: buffers start empty and grow to fit whatever is actually
+/// drawn, so nothing is ever silently dropped.
+struct GeometryBuffers {
     vertex_buffer: Buffer,
     index_buffer: Buffer,
     vertex_capacity: usize,
@@ -149,12 +148,12 @@ pub struct SpriteBatch {
     geometry: Geometry,
 }
 
-impl SpriteBatch {
+impl GeometryBuffers {
     /// Creates a batch with empty GPU buffers.
     ///
     /// The first `flush()` sizes them to the frame that is actually drawn, so
     /// a game that draws little pays for little.
-    pub fn new(device: &Device) -> Self {
+    fn new(device: &Device) -> Self {
         Self {
             vertex_buffer: create_vertex_buffer(device, 0),
             index_buffer: create_index_buffer(device, 0),
@@ -164,46 +163,15 @@ impl SpriteBatch {
         }
     }
 
-    /// Queues a filled rectangle for drawing.
-    ///
-    /// - `position` — top-left corner in world coordinates (y-down)
-    /// - `size`     — width × height in world units
-    /// - `color`    — RGBA fill colour
-    pub fn draw_rect(&mut self, position: Vec2, size: Vec2, color: Color) {
-        self.geometry.push(&rect_vertices(position, size, color), &RECT_INDICES);
+    fn push(&mut self, vertices: &[Vertex], indices: &[u32]) {
+        self.geometry.push(vertices, indices);
     }
 
-    /// Queues a filled triangle for drawing.
-    ///
-    /// - `p1`, `p2`, `p3` — The three corners of the triangle in world coordinates
-    /// - `color`          — RGBA fill colour
-    pub fn draw_triangle(&mut self, p1: Vec2, p2: Vec2, p3: Vec2, color: Color) {
-        self.geometry
-            .push(&triangle_vertices(p1, p2, p3, color), &TRIANGLE_INDICES);
-    }
-
-    /// Queues a filled triangle in 3D view space.
-    ///
-    /// - `p1`, `p2`, `p3` — the three vertices, in the perspective camera's
-    ///   view space (see [`redixel_math::Mat4::perspective`])
-    /// - `color`          — RGBA fill colour
-    pub fn draw_triangle_3d(&mut self, p1: Vec3, p2: Vec3, p3: Vec3, color: Color) {
-        self.geometry
-            .push(&triangle_vertices_3d(p1, p2, p3, color), &TRIANGLE_INDICES);
-    }
-
-    /// Returns the number of unique vertices currently queued — four per
-    /// rectangle, three per triangle.
-    ///
-    /// Since the batch draws indexed, this is *not* the size of the draw call;
-    /// see [`SpriteBatch::index_count`].
-    pub fn unique_vertex_count(&self) -> usize {
+    fn unique_vertex_count(&self) -> usize {
         self.geometry.vertices.len()
     }
 
-    /// Returns the number of indices currently queued, which is the vertex
-    /// count the next `flush()` will submit.
-    pub fn index_count(&self) -> usize {
+    fn index_count(&self) -> usize {
         self.geometry.indices.len()
     }
 
@@ -212,7 +180,7 @@ impl SpriteBatch {
     ///
     /// Must be called **inside** an active `RenderPass`.
     /// Clears the internal queues after submission.
-    pub fn flush(&mut self, device: &Device, queue: &Queue, pass: &mut RenderPass<'_>) {
+    fn flush(&mut self, device: &Device, queue: &Queue, pass: &mut RenderPass<'_>) {
         let count: usize = self.geometry.indices.len();
         if count == 0 {
             return;
@@ -247,6 +215,120 @@ impl SpriteBatch {
             self.index_capacity = indices.next_power_of_two();
             self.index_buffer = create_index_buffer(device, self.index_capacity);
         }
+    }
+}
+
+/// Accumulates 2D shape draw calls per frame and submits them to the GPU in a
+/// single indexed draw call on `flush()`.
+///
+/// This is the standard 2D batch-rendering pattern: minimise draw calls by
+/// grouping same-pipeline geometry together.
+///
+/// Every vertex queued here sits at `z = 0` and is flushed through the pipeline
+/// that neither tests nor writes depth. For depth-tested geometry see
+/// [`MeshBatch`].
+pub struct SpriteBatch {
+    buffers: GeometryBuffers,
+}
+
+impl SpriteBatch {
+    pub fn new(device: &Device) -> Self {
+        Self {
+            buffers: GeometryBuffers::new(device),
+        }
+    }
+
+    /// Queues a filled rectangle for drawing.
+    ///
+    /// - `position` — top-left corner in world coordinates (y-down)
+    /// - `size`     — width × height in world units
+    /// - `color`    — RGBA fill colour
+    pub fn draw_rect(&mut self, position: Vec2, size: Vec2, color: Color) {
+        self.buffers.push(&rect_vertices(position, size, color), &RECT_INDICES);
+    }
+
+    /// Queues a filled triangle for drawing.
+    ///
+    /// - `p1`, `p2`, `p3` — The three corners of the triangle in world coordinates
+    /// - `color`          — RGBA fill colour
+    pub fn draw_triangle(&mut self, p1: Vec2, p2: Vec2, p3: Vec2, color: Color) {
+        self.buffers
+            .push(&triangle_vertices(p1, p2, p3, color), &TRIANGLE_INDICES);
+    }
+
+    /// Returns the number of unique vertices currently queued — four per
+    /// rectangle, three per triangle.
+    ///
+    /// Since the batch draws indexed, this is *not* the size of the draw call;
+    /// see [`SpriteBatch::index_count`].
+    pub fn unique_vertex_count(&self) -> usize {
+        self.buffers.unique_vertex_count()
+    }
+
+    /// Returns the number of indices currently queued, which is the vertex
+    /// count the next `flush()` will submit.
+    pub fn index_count(&self) -> usize {
+        self.buffers.index_count()
+    }
+
+    /// Uploads queued geometry and records the indexed draw call.
+    ///
+    /// Must be called **inside** an active `RenderPass`, with the 2D pipeline
+    /// and orthographic camera already bound. Clears the queue afterwards.
+    pub fn flush(&mut self, device: &Device, queue: &Queue, pass: &mut RenderPass<'_>) {
+        self.buffers.flush(device, queue, pass);
+    }
+}
+
+/// Accumulates 3D triangles per frame and submits them in a single indexed
+/// draw call on `flush()`.
+///
+/// Separate from [`SpriteBatch`] because it is flushed against the perspective
+/// camera and the depth-testing pipeline: mixing a `draw_rect` in would put a
+/// pixel-space rectangle through a 3D camera.
+pub struct MeshBatch {
+    buffers: GeometryBuffers,
+}
+
+impl MeshBatch {
+    pub fn new(device: &Device) -> Self {
+        Self {
+            buffers: GeometryBuffers::new(device),
+        }
+    }
+
+    /// Queues a filled triangle in 3D view space.
+    ///
+    /// - `p1`, `p2`, `p3` — the three vertices, in the perspective camera's
+    ///   view space (see [`redixel_math::Mat4::perspective`]). Winding is not
+    ///   significant; nothing is culled.
+    /// - `color`          — RGBA fill colour
+    pub fn draw_triangle_3d(&mut self, p1: Vec3, p2: Vec3, p3: Vec3, color: Color) {
+        self.buffers
+            .push(&triangle_vertices_3d(p1, p2, p3, color), &TRIANGLE_INDICES);
+    }
+
+    /// Returns the number of unique vertices currently queued — three per
+    /// triangle.
+    ///
+    /// Since the batch draws indexed, this is *not* the size of the draw call;
+    /// see [`MeshBatch::index_count`].
+    pub fn unique_vertex_count(&self) -> usize {
+        self.buffers.unique_vertex_count()
+    }
+
+    /// Returns the number of indices currently queued, which is the vertex
+    /// count the next `flush()` will submit.
+    pub fn index_count(&self) -> usize {
+        self.buffers.index_count()
+    }
+
+    /// Uploads queued geometry and records the indexed draw call.
+    ///
+    /// Must be called **inside** an active `RenderPass`, with the 3D pipeline
+    /// and perspective camera already bound. Clears the queue afterwards.
+    pub fn flush(&mut self, device: &Device, queue: &Queue, pass: &mut RenderPass<'_>) {
+        self.buffers.flush(device, queue, pass);
     }
 }
 

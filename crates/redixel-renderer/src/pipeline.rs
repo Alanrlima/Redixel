@@ -41,7 +41,7 @@ impl Vertex {
 }
 
 /// The uniform buffer fed to `group(0) binding(0)` in the shader.
-/// Contains a column-major 4×4 orthographic projection matrix.
+/// Contains a column-major 4×4 projection matrix.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct CameraUniform {
@@ -54,17 +54,54 @@ impl CameraUniform {
     }
 }
 
-/// Owns the WGPU render pipeline and the two camera uniforms bound to it —
-/// one orthographic (2D content), one perspective (3D content). Both share
-/// one `BindGroupLayout`, since the binding shape is identical; only one is
-/// bound at a time, immediately before the draw call that needs it.
+/// A camera's uniform buffer paired with the bind group that exposes it.
+///
+/// The 2D and 3D cameras differ only in the matrix they carry, so both are
+/// built from this type against the same layout.
+pub struct Camera {
+    pub buffer: Buffer,
+    pub bind_group: BindGroup,
+}
+
+impl Camera {
+    fn new(device: &Device, layout: &BindGroupLayout, buffer_label: &str, group_label: &str) -> Self {
+        let buffer: Buffer = device.create_buffer(&BufferDescriptor {
+            label: Some(buffer_label),
+            size: std::mem::size_of::<CameraUniform>() as u64,
+            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let bind_group: BindGroup = device.create_bind_group(&BindGroupDescriptor {
+            label: Some(group_label),
+            layout,
+            entries: &[BindGroupEntry {
+                binding: 0,
+                resource: BindingResource::Buffer(buffer.as_entire_buffer_binding()),
+            }],
+        });
+
+        Self { buffer, bind_group }
+    }
+
+    /// Uploads `projection` to this camera's uniform buffer.
+    pub fn update(&self, queue: &Queue, projection: [[f32; 4]; 4]) {
+        let uniform: CameraUniform = CameraUniform::from_mat4(projection);
+        queue.write_buffer(&self.buffer, 0, bytemuck::bytes_of(&uniform));
+    }
+}
+
+/// Owns the two render pipelines that draw coloured shapes, and the camera
+/// uniform each one reads.
+///
+/// Both run the same shader over the same vertex layout and share one
+/// `BindGroupLayout`, differing only in how they treat the depth attachment.
 pub struct ShapePipeline {
-    pub pipeline: RenderPipeline,
+    pub pipeline_2d: RenderPipeline,
+    pub pipeline_3d: RenderPipeline,
     pub bind_group_layout: BindGroupLayout,
-    pub camera_buffer: Buffer,
-    pub camera_bind_group: BindGroup,
-    pub camera_buffer_3d: Buffer,
-    pub camera_bind_group_3d: BindGroup,
+    pub camera_2d: Camera,
+    pub camera_3d: Camera,
 }
 
 impl ShapePipeline {
@@ -88,14 +125,14 @@ impl ShapePipeline {
             }],
         });
 
-        let (camera_buffer, camera_bind_group): (Buffer, BindGroup) = Self::create_camera(
+        let camera_2d: Camera = Camera::new(
             device,
             &bind_group_layout,
             "REDIXEL_CAMERA_BUFFER_2D",
             "REDIXEL_CAMERA_BIND_GROUP_2D",
         );
 
-        let (camera_buffer_3d, camera_bind_group_3d): (Buffer, BindGroup) = Self::create_camera(
+        let camera_3d: Camera = Camera::new(
             device,
             &bind_group_layout,
             "REDIXEL_CAMERA_BUFFER_3D",
@@ -108,17 +145,86 @@ impl ShapePipeline {
             ..Default::default()
         });
 
-        let pipeline: RenderPipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
-            label: Some("REDIXEL_SHAPE_PIPELINE"),
-            layout: Some(&pipeline_layout),
+        let pipeline_2d: RenderPipeline = Self::create_pipeline(
+            device,
+            &shader,
+            &pipeline_layout,
+            surface_format,
+            "REDIXEL_SHAPE_PIPELINE_2D",
+            Self::depth_2d(),
+        );
+
+        let pipeline_3d: RenderPipeline = Self::create_pipeline(
+            device,
+            &shader,
+            &pipeline_layout,
+            surface_format,
+            "REDIXEL_SHAPE_PIPELINE_3D",
+            Self::depth_3d(),
+        );
+
+        Self {
+            pipeline_2d,
+            pipeline_3d,
+            bind_group_layout,
+            camera_2d,
+            camera_3d,
+        }
+    }
+
+    /// Depth state for 3D geometry: a real depth test, written to the buffer.
+    ///
+    /// `LessEqual` rather than `Less` so coplanar geometry resolves in
+    /// submission order instead of the second surface failing its own test.
+    fn depth_3d() -> DepthStencilState {
+        DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(CompareFunction::LessEqual),
+            stencil: StencilState::default(),
+            bias: DepthBiasState::default(),
+        }
+    }
+
+    /// Depth state for 2D geometry: no test, no write.
+    ///
+    /// 2D content is painter-ordered, so later draw calls belong on top
+    /// regardless of the buffer, and writing to it would let a flat overlay
+    /// occlude the 3D scene behind it.
+    fn depth_2d() -> DepthStencilState {
+        DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: Some(false),
+            depth_compare: Some(CompareFunction::Always),
+            stencil: StencilState::default(),
+            bias: DepthBiasState::default(),
+        }
+    }
+
+    /// Builds one of the two shape pipelines. They differ only in `depth`.
+    ///
+    /// Neither culls: `draw_triangle_3d` takes its corners in whatever order
+    /// the caller supplies, so culling would silently drop triangles wound the
+    /// "wrong" way.
+    fn create_pipeline(
+        device: &Device,
+        shader: &ShaderModule,
+        layout: &PipelineLayout,
+        surface_format: TextureFormat,
+        label: &str,
+        depth: DepthStencilState,
+    ) -> RenderPipeline {
+        device.create_render_pipeline(&RenderPipelineDescriptor {
+            label: Some(label),
+            layout: Some(layout),
             vertex: VertexState {
-                module: &shader,
+                module: shader,
                 entry_point: Some("vs_main"),
                 buffers: &[Some(Vertex::layout())],
                 compilation_options: Default::default(),
             },
             fragment: Some(FragmentState {
-                module: &shader,
+                module: shader,
                 entry_point: Some("fs_main"),
                 targets: &[Some(ColorTargetState {
                     format: surface_format,
@@ -133,63 +239,10 @@ impl ShapePipeline {
                 polygon_mode: PolygonMode::Fill,
                 ..Default::default()
             },
-            depth_stencil: Some(DepthStencilState {
-                format: DEPTH_FORMAT,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(CompareFunction::LessEqual),
-                stencil: StencilState::default(),
-                bias: DepthBiasState::default(),
-            }),
+            depth_stencil: Some(depth),
             multisample: MultisampleState::default(),
             multiview_mask: None,
             cache: None,
-        });
-
-        Self {
-            pipeline,
-            bind_group_layout,
-            camera_buffer,
-            camera_bind_group,
-            camera_buffer_3d,
-            camera_bind_group_3d,
-        }
-    }
-
-    /// Builds a camera uniform buffer and its bind group against `layout`.
-    fn create_camera(
-        device: &Device,
-        layout: &BindGroupLayout,
-        buffer_label: &str,
-        group_label: &str,
-    ) -> (Buffer, BindGroup) {
-        let buffer: Buffer = device.create_buffer(&BufferDescriptor {
-            label: Some(buffer_label),
-            size: std::mem::size_of::<CameraUniform>() as u64,
-            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        let bind_group: BindGroup = device.create_bind_group(&BindGroupDescriptor {
-            label: Some(group_label),
-            layout,
-            entries: &[BindGroupEntry {
-                binding: 0,
-                resource: BindingResource::Buffer(buffer.as_entire_buffer_binding()),
-            }],
-        });
-
-        (buffer, bind_group)
-    }
-
-    /// Uploads the current orthographic matrix to the 2D camera uniform buffer.
-    pub fn update_camera(&self, queue: &Queue, projection: [[f32; 4]; 4]) {
-        let uniform: CameraUniform = CameraUniform::from_mat4(projection);
-        queue.write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&uniform));
-    }
-
-    /// Uploads the current perspective matrix to the 3D camera uniform buffer.
-    pub fn update_camera_3d(&self, queue: &Queue, projection: [[f32; 4]; 4]) {
-        let uniform: CameraUniform = CameraUniform::from_mat4(projection);
-        queue.write_buffer(&self.camera_buffer_3d, 0, bytemuck::bytes_of(&uniform));
+        })
     }
 }
