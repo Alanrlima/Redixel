@@ -28,7 +28,6 @@ pub(crate) struct GpuDevice {
     pub(crate) device: Device,
     pub(crate) queue: Queue,
     pub(crate) config: SurfaceConfiguration,
-    pub(crate) depth_texture: Texture,
     pub(crate) depth_view: TextureView,
 }
 
@@ -45,8 +44,7 @@ impl GpuDevice {
         surface.configure(&device, &config);
         Self::log_adapter(&adapter);
 
-        let (depth_texture, depth_view): (Texture, TextureView) =
-            Self::create_depth_texture(&device, config.width, config.height);
+        let depth_view: TextureView = Self::create_depth_view(&device, config.width, config.height);
 
         Ok(Self {
             device,
@@ -54,13 +52,16 @@ impl GpuDevice {
             config,
             instance,
             surface: Some(surface),
-            depth_texture,
             depth_view,
         })
     }
 
     /// Reconfigures the swap chain to match a new window size.
     /// No-ops for zero-area sizes (minimised window).
+    ///
+    /// The depth attachment is rebuilt alongside it: WGPU requires every
+    /// attachment in a render pass to share one resolution, so a depth buffer
+    /// left at the old size fails validation on the next draw.
     pub(crate) fn resize(&mut self, new_size: PhysicalSize<u32>) {
         if new_size.width == 0 || new_size.height == 0 {
             return;
@@ -73,10 +74,7 @@ impl GpuDevice {
             surface.configure(&self.device, &self.config);
         }
 
-        let (depth_texture, depth_view): (Texture, TextureView) =
-            Self::create_depth_texture(&self.device, new_size.width, new_size.height);
-        self.depth_texture = depth_texture;
-        self.depth_view = depth_view;
+        self.depth_view = Self::create_depth_view(&self.device, self.config.width, self.config.height);
     }
 
     /// Drops the surface when the application is suspended.
@@ -190,9 +188,10 @@ impl GpuDevice {
             .map_err(RedixelError::from)
     }
 
-    /// Creates a `Depth32Float` texture and its view, sized to match the
-    /// colour attachment.
-    fn create_depth_texture(device: &Device, width: u32, height: u32) -> (Texture, TextureView) {
+    /// Creates a `Depth32Float` texture sized to match the colour attachment
+    /// and returns the view the render pass binds. The view keeps the texture
+    /// alive, and nothing samples or copies the depth buffer.
+    fn create_depth_view(device: &Device, width: u32, height: u32) -> TextureView {
         let texture: Texture = device.create_texture(&TextureDescriptor {
             label: Some("REDIXEL_DEPTH_TEXTURE"),
             size: Extent3d {
@@ -208,8 +207,7 @@ impl GpuDevice {
             view_formats: &[],
         });
 
-        let view: TextureView = texture.create_view(&TextureViewDescriptor::default());
-        (texture, view)
+        texture.create_view(&TextureViewDescriptor::default())
     }
 
     fn build_surface_config(
