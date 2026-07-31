@@ -1,6 +1,6 @@
 use wgpu::{Buffer, BufferDescriptor, BufferUsages, Device, IndexFormat, Queue, RenderPass};
 
-use redixel_math::{Color, Vec2};
+use redixel_math::{Color, Vec2, Vec3};
 
 use crate::pipeline::Vertex;
 
@@ -25,19 +25,19 @@ fn rect_vertices(position: Vec2, size: Vec2, color: Color) -> [Vertex; 4] {
 
     [
         Vertex {
-            position: [x0, y0],
+            position: [x0, y0, 0.0],
             color: c,
         },
         Vertex {
-            position: [x1, y0],
+            position: [x1, y0, 0.0],
             color: c,
         },
         Vertex {
-            position: [x0, y1],
+            position: [x0, y1, 0.0],
             color: c,
         },
         Vertex {
-            position: [x1, y1],
+            position: [x1, y1, 0.0],
             color: c,
         },
     ]
@@ -49,15 +49,38 @@ fn triangle_vertices(p1: Vec2, p2: Vec2, p3: Vec2, color: Color) -> [Vertex; 3] 
 
     [
         Vertex {
-            position: [p1.x, p1.y],
+            position: [p1.x, p1.y, 0.0],
             color: c,
         },
         Vertex {
-            position: [p2.x, p2.y],
+            position: [p2.x, p2.y, 0.0],
             color: c,
         },
         Vertex {
-            position: [p3.x, p3.y],
+            position: [p3.x, p3.y, 0.0],
+            color: c,
+        },
+    ]
+}
+
+/// Builds the three corners of a 3D triangle in the order they were given.
+///
+/// Unlike `triangle_vertices`, the caller supplies a real z — this is the
+/// only vertex-building path whose depth isn't hardcoded to zero.
+fn triangle_vertices_3d(p1: Vec3, p2: Vec3, p3: Vec3, color: Color) -> [Vertex; 3] {
+    let c: [f32; 4] = color.to_array();
+
+    [
+        Vertex {
+            position: [p1.x, p1.y, p1.z],
+            color: c,
+        },
+        Vertex {
+            position: [p2.x, p2.y, p2.z],
+            color: c,
+        },
+        Vertex {
+            position: [p3.x, p3.y, p3.z],
             color: c,
         },
     ]
@@ -159,6 +182,16 @@ impl SpriteBatch {
             .push(&triangle_vertices(p1, p2, p3, color), &TRIANGLE_INDICES);
     }
 
+    /// Queues a filled triangle in 3D view space.
+    ///
+    /// - `p1`, `p2`, `p3` — the three vertices, in the perspective camera's
+    ///   view space (see [`redixel_math::Mat4::perspective`])
+    /// - `color`          — RGBA fill colour
+    pub fn draw_triangle_3d(&mut self, p1: Vec3, p2: Vec3, p3: Vec3, color: Color) {
+        self.geometry
+            .push(&triangle_vertices_3d(p1, p2, p3, color), &TRIANGLE_INDICES);
+    }
+
     /// Returns the number of unique vertices currently queued — four per
     /// rectangle, three per triangle.
     ///
@@ -223,7 +256,7 @@ mod tests {
 
     use super::*;
 
-    fn positions(vertices: &[Vertex]) -> Vec<[f32; 2]> {
+    fn positions(vertices: &[Vertex]) -> Vec<[f32; 3]> {
         vertices.iter().map(|v: &Vertex| v.position).collect()
     }
 
@@ -234,6 +267,7 @@ mod tests {
             position: [
                 projection.cols[0][0] * vertices[i].position[0] + projection.cols[3][0],
                 projection.cols[1][1] * vertices[i].position[1] + projection.cols[3][1],
+                0.0,
             ],
             color: vertices[i].color,
         })
@@ -241,9 +275,9 @@ mod tests {
 
     fn signed_area(vertices: &[Vertex], indices: &[u32], triangle: usize) -> f32 {
         let i: usize = triangle * 3;
-        let a: [f32; 2] = vertices[indices[i] as usize].position;
-        let b: [f32; 2] = vertices[indices[i + 1] as usize].position;
-        let c: [f32; 2] = vertices[indices[i + 2] as usize].position;
+        let a: [f32; 3] = vertices[indices[i] as usize].position;
+        let b: [f32; 3] = vertices[indices[i + 1] as usize].position;
+        let c: [f32; 3] = vertices[indices[i + 2] as usize].position;
 
         (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
     }
@@ -273,7 +307,12 @@ mod tests {
 
         assert_eq!(
             positions(&vertices),
-            vec![[10.0, 20.0], [13.0, 20.0], [10.0, 24.0], [13.0, 24.0]]
+            vec![
+                [10.0, 20.0, 0.0],
+                [13.0, 20.0, 0.0],
+                [10.0, 24.0, 0.0],
+                [13.0, 24.0, 0.0]
+            ]
         );
     }
 
@@ -362,5 +401,29 @@ mod tests {
 
         assert!(geometry.vertices.is_empty());
         assert!(geometry.indices.is_empty());
+    }
+
+    #[test]
+    fn triangle_vertices_3d_carries_real_depth() {
+        let vertices: [Vertex; 3] = triangle_vertices_3d(
+            Vec3::new(0.0, 1.0, 2.0),
+            Vec3::new(-1.0, -1.0, 2.0),
+            Vec3::new(1.0, -1.0, 2.0),
+            Color::WHITE,
+        );
+
+        assert_eq!(positions(&vertices), vec![[0.0, 1.0, 2.0], [-1.0, -1.0, 2.0], [1.0, -1.0, 2.0]]);
+    }
+
+    #[test]
+    fn triangle_3d_pushes_three_sequential_indices() {
+        let mut geometry: Geometry = Geometry::default();
+        geometry.push(
+            &triangle_vertices_3d(Vec3::ZERO, Vec3::X, Vec3::Y, Color::WHITE),
+            &TRIANGLE_INDICES,
+        );
+
+        assert_eq!(geometry.vertices.len(), 3);
+        assert_eq!(geometry.indices, vec![0, 1, 2]);
     }
 }

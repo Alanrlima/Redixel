@@ -3,8 +3,8 @@ use std::sync::Arc;
 use wgpu::{
     Backends, CommandEncoder, CommandEncoderDescriptor,
     CurrentSurfaceTexture::{Lost, Occluded, Outdated, Suboptimal, Success, Timeout, Validation},
-    LoadOp, Operations, PresentMode, RenderPass, RenderPassColorAttachment, RenderPassDescriptor, StoreOp, Surface,
-    SurfaceTexture, TextureView, TextureViewDescriptor,
+    LoadOp, Operations, PresentMode, RenderPass, RenderPassColorAttachment, RenderPassDepthStencilAttachment,
+    RenderPassDescriptor, StoreOp, Surface, SurfaceTexture, TextureView, TextureViewDescriptor,
 };
 
 use winit::{
@@ -13,9 +13,13 @@ use winit::{
 };
 
 use redixel_core::RedixelError;
-use redixel_math::{Color, Mat4, Vec2};
+use redixel_math::{Color, Mat4, Vec2, Vec3};
 
 use crate::{batch::SpriteBatch, device::GpuDevice, pipeline::ShapePipeline};
+
+const CAMERA_FOV_Y_DEGREES: f32 = 60.0;
+const CAMERA_NEAR: f32 = 0.1;
+const CAMERA_FAR: f32 = 100.0;
 
 /// All renderer settings resolved from `config.json` by `redixel-runtime`
 /// and injected at construction time. The renderer never touches the config system.
@@ -38,6 +42,7 @@ impl Default for RendererConfig {
 pub struct DrawQueue {
     pub clear: Color,
     pub batch: SpriteBatch,
+    pub batch_3d: SpriteBatch,
 }
 
 /// High-level renderer. Owns the GPU device, shape pipeline, and sprite batch.
@@ -57,6 +62,7 @@ impl Renderer {
         let device: GpuDevice = GpuDevice::new(window, &config).await?;
         let pipeline: ShapePipeline = ShapePipeline::new(&device.device, device.config.format);
         let batch: SpriteBatch = SpriteBatch::new(&device.device);
+        let batch_3d: SpriteBatch = SpriteBatch::new(&device.device);
 
         Ok(Self {
             device,
@@ -64,6 +70,7 @@ impl Renderer {
             queue: DrawQueue {
                 clear: Color::rgb(0.1, 0.2, 0.3),
                 batch,
+                batch_3d,
             },
         })
     }
@@ -116,11 +123,16 @@ impl Renderer {
         self.queue.batch.draw_triangle(p1, p2, p3, color);
     }
 
+    /// Queues a filled triangle in 3D view space.
+    pub fn draw_triangle_3d(&mut self, p1: Vec3, p2: Vec3, p3: Vec3, color: Color) {
+        self.queue.batch_3d.draw_triangle_3d(p1, p2, p3, color);
+    }
+
     /// Flushes all queued draw calls and presents the frame.
     ///
-    /// 1. Uploads the orthographic camera matrix
-    /// 2. Begins the render pass (clear)
-    /// 3. Flushes the sprite batch (one draw call)
+    /// 1. Uploads the orthographic and perspective camera matrices
+    /// 2. Begins the render pass (clear colour + depth)
+    /// 3. Flushes the 2D batch, then the 3D batch, each with its own camera
     /// 4. Submits commands and presents
     pub fn render(&mut self) -> Result<(), RedixelError> {
         let Some(surface) = &self.device.surface else {
@@ -128,8 +140,13 @@ impl Renderer {
         };
 
         let (w, h): (u32, u32) = self.surface_size();
-        let projection: Mat4 = Mat4::orthographic(0.0, w as f32, h as f32, 0.0, -1.0, 1.0);
-        self.pipeline.update_camera(&self.device.queue, projection.cols);
+
+        let ortho: Mat4 = Mat4::orthographic(0.0, w as f32, h as f32, 0.0, -1.0, 1.0);
+        self.pipeline.update_camera(&self.device.queue, ortho.cols);
+
+        let aspect: f32 = w as f32 / h as f32;
+        let perspective: Mat4 = Mat4::perspective(CAMERA_FOV_Y_DEGREES.to_radians(), aspect, CAMERA_NEAR, CAMERA_FAR);
+        self.pipeline.update_camera_3d(&self.device.queue, perspective.cols);
 
         let output: SurfaceTexture = Self::get_surface_texture(surface)?;
         let view: TextureView = output.texture.create_view(&TextureViewDescriptor::default());
@@ -152,7 +169,14 @@ impl Renderer {
                         store: StoreOp::Store,
                     },
                 })],
-                depth_stencil_attachment: None,
+                depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
+                    view: &self.device.depth_view,
+                    depth_ops: Some(Operations {
+                        load: LoadOp::Clear(1.0),
+                        store: StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
                 occlusion_query_set: None,
                 timestamp_writes: None,
                 ..Default::default()
@@ -162,6 +186,11 @@ impl Renderer {
             pass.set_bind_group(0, &self.pipeline.camera_bind_group, &[]);
             self.queue
                 .batch
+                .flush(&self.device.device, &self.device.queue, &mut pass);
+
+            pass.set_bind_group(0, &self.pipeline.camera_bind_group_3d, &[]);
+            self.queue
+                .batch_3d
                 .flush(&self.device.device, &self.device.queue, &mut pass);
         }
 

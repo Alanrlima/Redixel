@@ -1,7 +1,10 @@
 // Redixel — Shape / Sprite Batch Shader
 //
-// Draws coloured, axis-aligned quads from a per-vertex colour attribute.
-// The ortho projection matrix is updated once per frame via a uniform buffer.
+// Draws coloured triangles/quads from a per-vertex colour attribute. The
+// shader itself is agnostic to which camera projection is bound — the caller
+// binds the orthographic uniform before flushing 2D geometry and the
+// perspective uniform before flushing 3D geometry, both against this same
+// pipeline.
 struct CameraUniforms {
     projection: mat4x4<f32>,
 }
@@ -10,7 +13,7 @@ struct CameraUniforms {
 var<uniform> camera: CameraUniforms;
 
 struct VertexIn {
-    @location(0) position: vec2<f32>,
+    @location(0) position: vec3<f32>,
     @location(1) color: vec4<f32>,
 }
 
@@ -22,7 +25,7 @@ struct VertexOut {
 @vertex
 fn vs_main(in: VertexIn) -> VertexOut {
     var out: VertexOut;
-    out.clip_pos = camera.projection * vec4<f32>(in.position, 0.0, 1.0);
+    out.clip_pos = camera.projection * vec4<f32>(in.position, 1.0);
     out.color = in.color;
     return out;
 }
