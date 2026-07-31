@@ -55,6 +55,33 @@ impl Mat4 {
         )
     }
 
+    /// Constructs a left-handed perspective projection matrix.
+    ///
+    /// The camera sits at the origin looking down `+Z`, with `+X` right and
+    /// `+Y` up. `fov_y_radians` is the full vertical field of view; `near`/
+    /// `far` are positive distances along that forward axis. Depth range
+    /// `[near, far]` maps to `[0, 1]` (WGPU convention), matching
+    /// [`orthographic`](Self::orthographic). Unlike `orthographic`, this does
+    /// not flip Y — there is no top-left-origin screen convention to match in
+    /// view space.
+    ///
+    /// # Usage
+    /// ```ignore
+    /// Mat4::perspective(60.0_f32.to_radians(), w / h, 0.1, 100.0)
+    /// ```
+    pub fn perspective(fov_y_radians: f32, aspect: f32, near: f32, far: f32) -> Self {
+        let (sin, cos): (f32, f32) = (0.5 * fov_y_radians).sin_cos();
+        let f: f32 = cos / sin;
+        let range: f32 = far / (far - near);
+
+        Self::from_cols(
+            [f / aspect, 0.0, 0.0, 0.0],
+            [0.0, f, 0.0, 0.0],
+            [0.0, 0.0, range, 1.0],
+            [0.0, 0.0, -range * near, 0.0],
+        )
+    }
+
     /// Returns a translation matrix that moves points by `(tx, ty, tz)`.
     pub fn translate(tx: f32, ty: f32, tz: f32) -> Self {
         let mut m: Mat4 = Self::IDENTITY;
@@ -142,5 +169,25 @@ mod tests {
         let t: Mat4 = Mat4::translate(5.0, 3.0, 0.0);
         let s: Mat4 = Mat4::scale(2.0, 2.0, 1.0);
         let _m: Mat4 = t * s;
+    }
+
+    #[test]
+    fn perspective_scales_by_cotangent_of_half_fov_over_aspect() {
+        let proj: Mat4 = Mat4::perspective(std::f32::consts::FRAC_PI_2, 2.0, 1.0, 100.0);
+        let c: [[f32; 4]; 4] = proj.cols;
+
+        assert!((c[0][0] - 0.5).abs() < EPS);
+        assert!((c[1][1] - 1.0).abs() < EPS);
+    }
+
+    #[test]
+    fn perspective_maps_near_and_far_planes_into_wgpu_depth_range() {
+        let (near, far): (f32, f32) = (1.0, 100.0);
+        let proj: Mat4 = Mat4::perspective(std::f32::consts::FRAC_PI_2, 1.0, near, far);
+        let c: [[f32; 4]; 4] = proj.cols;
+        let ndc_z = |z: f32| c[2][2] + c[3][2] / z;
+
+        assert!(ndc_z(near).abs() < EPS);
+        assert!((ndc_z(far) - 1.0).abs() < EPS);
     }
 }
