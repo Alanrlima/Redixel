@@ -1,6 +1,6 @@
 use winit::{event::MouseButton, keyboard::KeyCode};
 
-use redixel_math::{Color, Vec2};
+use redixel_math::{Color, Vec2, Vec3};
 
 use crate::{InputAction, InputSource, RedixelError, net::NetworkManager};
 
@@ -157,6 +157,14 @@ pub trait GameContext<A: InputAction> {
     /// - `size`     — width × height in pixels
     /// - `color`    — fill colour
     fn draw_rect(&mut self, position: Vec2, size: Vec2, color: Color);
+
+    /// Draws a filled triangle in 3D view space.
+    ///
+    /// - `p1`, `p2`, `p3` — the three vertices, in the engine's perspective
+    ///   camera's view space: camera at the origin, looking down `+Z`, `+Y`
+    ///   up (see [`Mat4::perspective`](redixel_math::Mat4::perspective))
+    /// - `color`          — fill colour
+    fn draw_triangle_3d(&mut self, p1: Vec3, p2: Vec3, p3: Vec3, color: Color);
 
     /// Extracts any pending engine error out of the context.
     fn take_error(&mut self) -> Option<RedixelError>;
