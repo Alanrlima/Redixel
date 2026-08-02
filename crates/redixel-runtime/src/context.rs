@@ -4,15 +4,17 @@ use redixel_core::{
     input::InputAction,
     net::{NetworkManager, NoOpNetwork},
 };
-use redixel_math::{Color, Vec2};
+use redixel_math::{Color, Vec2, Vec3};
 use redixel_platform::InputManager;
 
 /// A draw command buffered during `on_render` and flushed by the runtime.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum DrawCommand {
     ClearColor(Color),
     Rect { position: Vec2, size: Vec2, color: Color },
     Triangle { p1: Vec2, p2: Vec2, p3: Vec2, color: Color },
+    Triangle3d { p1: Vec3, p2: Vec3, p3: Vec3, color: Color },
 }
 
 /// Concrete engine context passed to [`Game`](redixel_core::Game) callbacks each frame.
@@ -183,6 +185,10 @@ impl<A: InputAction> GameContext<A> for Context<A> {
 
     fn draw_rect(&mut self, position: Vec2, size: Vec2, color: Color) {
         self.commands.push(DrawCommand::Rect { position, size, color });
+    }
+
+    fn draw_triangle_3d(&mut self, p1: Vec3, p2: Vec3, p3: Vec3, color: Color) {
+        self.commands.push(DrawCommand::Triangle3d { p1, p2, p3, color });
     }
 
     fn take_error(&mut self) -> Option<RedixelError> {

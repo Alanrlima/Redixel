@@ -16,7 +16,7 @@ pub mod prelude {
         NetworkEvent, NetworkManager, RedixelError, SERVER_ID, SequenceBuffer,
     };
 
-    pub use redixel_math::{Color, Mat4, Vec2};
+    pub use redixel_math::{Color, Mat4, Vec2, Vec3};
     pub use redixel_runtime::RuntimeConfig;
 
     #[cfg(feature = "net")]

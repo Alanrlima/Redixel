@@ -376,6 +376,9 @@ impl<G: Game> Runtime<G> {
                 DrawCommand::Triangle { p1, p2, p3, color } => {
                     state.renderer.draw_triangle(p1, p2, p3, color);
                 }
+                DrawCommand::Triangle3d { p1, p2, p3, color } => {
+                    state.renderer.draw_triangle_3d(p1, p2, p3, color);
+                }
             }
         }
 

@@ -34,7 +34,7 @@
 - [ ] **Batch Renderer:** Implement a dynamic Vertex Buffer that groups multiple sprites into a single draw call to minimize GPU overhead.
 - [ ] **Text & Font Renderer:** Integrate `ab_glyph` to generate font atlases and draw dynamic text via the Batch Renderer.
 - [ ] **Particle System:** Implement a lightweight data structure to process and render thousands of ephemeral quads efficiently.
-- [ ] **Z-Ordering:** Implement CPU-side depth sorting (Painter's Algorithm) or GPU-side depth buffering.
+- [x] **Z-Ordering:** GPU-side depth buffering (`Depth32Float`) resolves occlusion per pixel. 2D content stays painter-ordered, drawn over the depth-tested scene.
 - [ ] **Primitive Rendering:** Implement logic to draw debug shapes (lines, wireframe rectangles) for physics visualization.
 
 ## **Phase 4 — Input & Camera Control**

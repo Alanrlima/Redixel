@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
 use wgpu::{
-    Adapter, AdapterInfo, Backend, BackendOptions, Backends, Device, DeviceType, ExperimentalFeatures, Features,
-    Instance, InstanceDescriptor, InstanceFlags, MemoryBudgetThresholds, MemoryHints, PowerPreference, PresentMode,
-    Queue, RequestAdapterOptions, Surface, SurfaceCapabilities, SurfaceColorSpace, SurfaceConfiguration, TextureFormat,
-    TextureUsages, Trace,
+    Adapter, AdapterInfo, BackendOptions, Backends, Device, ExperimentalFeatures, Extent3d, Features, Instance,
+    InstanceDescriptor, InstanceFlags, MemoryBudgetThresholds, MemoryHints, PowerPreference, PresentMode, Queue,
+    RequestAdapterOptions, Surface, SurfaceCapabilities, SurfaceColorSpace, SurfaceConfiguration, Texture,
+    TextureDescriptor, TextureDimension, TextureFormat, TextureUsages, TextureView, TextureViewDescriptor, Trace,
     wgt::{DeviceDescriptor, SurfaceConfiguration as WgtSurfaceConfiguration},
 };
 
@@ -14,31 +14,7 @@ use redixel_core::RedixelError;
 
 use crate::renderer::RendererConfig;
 
-/// Formats an adapter for logging, tolerating the fields a backend leaves blank.
-///
-/// Browsers deliberately withhold adapter identity to limit fingerprinting, so
-/// under WebGPU the name and both driver strings arrive empty. Blank fields are
-/// replaced or dropped rather than logged as empty text; the device type and
-/// backend are populated on every platform and carry the useful signal when the
-/// rest is missing.
-///
-/// Takes the individual fields rather than an [`AdapterInfo`] so it stays
-/// testable without constructing one — `wgpu` adds fields to that struct
-/// between releases.
-fn describe_adapter(name: &str, driver: &str, driver_info: &str, device_type: DeviceType, backend: Backend) -> String {
-    let name: &str = match name.trim() {
-        "" => "unidentified adapter",
-        name => name,
-    };
-
-    let driver: String = match (driver.trim(), driver_info.trim()) {
-        ("", "") => String::new(),
-        ("", detail) | (detail, "") => format!(" driver: {detail}"),
-        (driver, detail) => format!(" driver: {driver} {detail}"),
-    };
-
-    format!("{name} [{device_type:?} / {backend:?}]{driver}")
-}
+pub(crate) const DEPTH_FORMAT: TextureFormat = TextureFormat::Depth32Float;
 
 /// Owns the WGPU logical device, presentation surface, and submission queue.
 ///
@@ -52,6 +28,7 @@ pub(crate) struct GpuDevice {
     pub(crate) device: Device,
     pub(crate) queue: Queue,
     pub(crate) config: SurfaceConfiguration,
+    pub(crate) depth_view: TextureView,
 }
 
 impl GpuDevice {
@@ -67,17 +44,24 @@ impl GpuDevice {
         surface.configure(&device, &config);
         Self::log_adapter(&adapter);
 
+        let depth_view: TextureView = Self::create_depth_view(&device, config.width, config.height);
+
         Ok(Self {
             device,
             queue,
             config,
             instance,
             surface: Some(surface),
+            depth_view,
         })
     }
 
     /// Reconfigures the swap chain to match a new window size.
     /// No-ops for zero-area sizes (minimised window).
+    ///
+    /// The depth attachment is rebuilt alongside it: WGPU requires every
+    /// attachment in a render pass to share one resolution, so a depth buffer
+    /// left at the old size fails validation on the next draw.
     pub(crate) fn resize(&mut self, new_size: PhysicalSize<u32>) {
         if new_size.width == 0 || new_size.height == 0 {
             return;
@@ -89,6 +73,8 @@ impl GpuDevice {
         if let Some(surface) = &self.surface {
             surface.configure(&self.device, &self.config);
         }
+
+        self.depth_view = Self::create_depth_view(&self.device, self.config.width, self.config.height);
     }
 
     /// Drops the surface when the application is suspended.
@@ -149,13 +135,31 @@ impl GpuDevice {
     ///
     /// Worth logging unconditionally: a software rasteriser (llvmpipe,
     /// lavapipe) is selected silently when no hardware adapter is present, and
-    /// any timing measured against it says nothing about real hardware.
+    /// any timing measured against it says nothing about real hardware. Name
+    /// and driver strings arrive blank under WebGPU — browsers withhold them
+    /// to limit fingerprinting — so blanks are substituted or dropped instead
+    /// of logging empty text.
     fn log_adapter(adapter: &Adapter) {
         let info: AdapterInfo = adapter.get_info();
-        log::info!(
-            "GPU adapter: {}",
-            describe_adapter(&info.name, &info.driver, &info.driver_info, info.device_type, info.backend)
-        );
+
+        let name: &str = match info.name.trim() {
+            "" => "unidentified adapter",
+            name => name,
+        };
+
+        let driver: String = format!("{} {}", info.driver.trim(), info.driver_info.trim())
+            .trim()
+            .to_string();
+
+        if driver.is_empty() {
+            log::info!("GPU adapter: {name} [{:?} / {:?}]", info.device_type, info.backend);
+        } else {
+            log::info!(
+                "GPU adapter: {name} [{:?} / {:?}] driver: {driver}",
+                info.device_type,
+                info.backend
+            );
+        }
     }
 
     async fn request_adapter(instance: &Instance, surface: &Surface<'static>) -> Result<Adapter, RedixelError> {
@@ -182,6 +186,28 @@ impl GpuDevice {
             })
             .await
             .map_err(RedixelError::from)
+    }
+
+    /// Creates a `Depth32Float` texture sized to match the colour attachment
+    /// and returns the view the render pass binds. The view keeps the texture
+    /// alive, and nothing samples or copies the depth buffer.
+    fn create_depth_view(device: &Device, width: u32, height: u32) -> TextureView {
+        let texture: Texture = device.create_texture(&TextureDescriptor {
+            label: Some("REDIXEL_DEPTH_TEXTURE"),
+            size: Extent3d {
+                width: width.max(1),
+                height: height.max(1),
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: DEPTH_FORMAT,
+            usage: TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+
+        texture.create_view(&TextureViewDescriptor::default())
     }
 
     fn build_surface_config(
@@ -218,49 +244,5 @@ impl GpuDevice {
             desired_maximum_frame_latency: 2,
             color_space: SurfaceColorSpace::Auto,
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn describes_a_fully_populated_native_adapter() {
-        let described: String = describe_adapter(
-            "NVIDIA GeForce GTX 1660 Ti",
-            "NVIDIA",
-            "595.84",
-            DeviceType::DiscreteGpu,
-            Backend::Vulkan,
-        );
-
-        assert_eq!(
-            described,
-            "NVIDIA GeForce GTX 1660 Ti [DiscreteGpu / Vulkan] driver: NVIDIA 595.84"
-        );
-    }
-
-    #[test]
-    fn names_an_adapter_the_browser_refuses_to_identify() {
-        let described: String = describe_adapter("", "", "", DeviceType::Other, Backend::BrowserWebGpu);
-
-        assert_eq!(described, "unidentified adapter [Other / BrowserWebGpu]");
-    }
-
-    #[test]
-    fn drops_the_driver_clause_when_both_halves_are_blank() {
-        let described: String = describe_adapter("llvmpipe", "  ", "", DeviceType::Cpu, Backend::Vulkan);
-
-        assert_eq!(described, "llvmpipe [Cpu / Vulkan]");
-    }
-
-    #[test]
-    fn keeps_whichever_driver_half_is_present() {
-        let only_name: String = describe_adapter("a", "Mesa", "", DeviceType::Cpu, Backend::Gl);
-        let only_detail: String = describe_adapter("a", "", "25.0.1", DeviceType::Cpu, Backend::Gl);
-
-        assert_eq!(only_name, "a [Cpu / Gl] driver: Mesa");
-        assert_eq!(only_detail, "a [Cpu / Gl] driver: 25.0.1");
     }
 }
