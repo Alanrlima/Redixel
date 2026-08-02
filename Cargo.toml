@@ -9,6 +9,12 @@ license = "Apache-2.0"
 authors = ["Redixel Core Team"]
 repository = "https://github.com/RedixelCoreTeam"
 
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
 [workspace.dependencies]
 # Internal crates
 redixel = { path = "crates/redixel" }
