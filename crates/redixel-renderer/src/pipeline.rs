@@ -12,10 +12,13 @@ use crate::device::DEPTH_FORMAT;
 
 const SHADER_SRC: &str = include_str!("../shaders/shape.wgsl");
 
-/// A single vertex in the shape batch: 3D position + RGBA colour.
+/// A single vertex in the shape batch: 3D position + RGBA colour + texture
+/// coordinate.
 ///
-/// 2D draw calls (`draw_rect`/`draw_triangle`) carry `z = 0.0` through; only
-/// the 3D path (`draw_triangle_3d`) supplies a real z.
+/// 2D draw calls carry `z = 0.0` through; only `draw_triangle_3d` supplies a
+/// real z. Untextured geometry carries `uv = [0.0, 0.0]` and samples the
+/// registry's 1×1 white pixel, so every vertex goes through the same
+/// sample-and-multiply, textured or not.
 ///
 /// `repr(C)` + packed fields → safe to cast to `&[u8]` via `bytemuck`.
 #[repr(C)]
@@ -23,12 +26,14 @@ const SHADER_SRC: &str = include_str!("../shaders/shape.wgsl");
 pub struct Vertex {
     pub position: [f32; 3],
     pub color: [f32; 4],
+    pub uv: [f32; 2],
 }
 
 impl Vertex {
-    const ATTRIBUTES: [VertexAttribute; 2] = wgpu::vertex_attr_array![
+    const ATTRIBUTES: [VertexAttribute; 3] = wgpu::vertex_attr_array![
         0 => Float32x3,
         1 => Float32x4,
+        2 => Float32x2,
     ];
 
     pub fn layout() -> VertexBufferLayout<'static> {
@@ -91,11 +96,16 @@ impl Camera {
     }
 }
 
-/// Owns the two render pipelines that draw coloured shapes, and the camera
-/// uniform each one reads.
+/// Owns the two render pipelines that draw shapes, and the camera uniform each
+/// one reads.
 ///
-/// Both run the same shader over the same vertex layout and share one
-/// `BindGroupLayout`, differing only in how they treat the depth attachment.
+/// Both run the same shader over the same vertex layout, differing only in how
+/// they treat the depth attachment. Group 1 (texture + sampler) belongs to the
+/// [`TextureRegistry`], which owns its layout because it also owns every bind
+/// group built against it, and both pipelines declare it — so the 3D path binds
+/// the white pixel and its output is unchanged.
+///
+/// [`TextureRegistry`]: crate::texture::TextureRegistry
 pub struct ShapePipeline {
     pub pipeline_2d: RenderPipeline,
     pub pipeline_3d: RenderPipeline,
@@ -105,7 +115,7 @@ pub struct ShapePipeline {
 }
 
 impl ShapePipeline {
-    pub fn new(device: &Device, surface_format: TextureFormat) -> Self {
+    pub fn new(device: &Device, surface_format: TextureFormat, texture_layout: &BindGroupLayout) -> Self {
         let shader: ShaderModule = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("REDIXEL_SHAPE_SHADER"),
             source: ShaderSource::Wgsl(SHADER_SRC.into()),
@@ -141,7 +151,7 @@ impl ShapePipeline {
 
         let pipeline_layout: PipelineLayout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
             label: Some("REDIXEL_SHAPE_PIPELINE_LAYOUT"),
-            bind_group_layouts: &[Some(&bind_group_layout)],
+            bind_group_layouts: &[Some(&bind_group_layout), Some(texture_layout)],
             ..Default::default()
         });
 

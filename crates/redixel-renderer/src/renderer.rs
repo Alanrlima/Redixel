@@ -12,13 +12,14 @@ use winit::{
     window::{self, Window},
 };
 
-use redixel_core::RedixelError;
+use redixel_core::{RedixelError, TextureId};
 use redixel_math::{Color, Mat4, Vec2, Vec3};
 
 use crate::{
     batch::{MeshBatch, SpriteBatch},
     device::GpuDevice,
     pipeline::ShapePipeline,
+    texture::TextureRegistry,
 };
 
 const CAMERA_FOV_Y_DEGREES: f32 = 60.0;
@@ -58,25 +59,41 @@ pub struct DrawQueue {
 pub struct Renderer {
     device: GpuDevice,
     pipeline: ShapePipeline,
+    textures: TextureRegistry,
     queue: DrawQueue,
 }
 
 impl Renderer {
+    /// The registry is built before the pipelines because it owns the layout
+    /// of bind group 1, which those pipelines declare.
     pub async fn new(window: Arc<dyn Window>, config: RendererConfig) -> Result<Self, RedixelError> {
         let device: GpuDevice = GpuDevice::new(window, &config).await?;
-        let pipeline: ShapePipeline = ShapePipeline::new(&device.device, device.config.format);
+
+        let textures: TextureRegistry = TextureRegistry::new(&device.device, &device.queue);
+        let pipeline: ShapePipeline = ShapePipeline::new(&device.device, device.config.format, textures.layout());
+
         let batch_2d: SpriteBatch = SpriteBatch::new(&device.device);
         let batch_3d: MeshBatch = MeshBatch::new(&device.device);
 
         Ok(Self {
             device,
             pipeline,
+            textures,
             queue: DrawQueue {
                 clear: Color::rgb(0.1, 0.2, 0.3),
                 batch_2d,
                 batch_3d,
             },
         })
+    }
+
+    /// Decodes `bytes` and uploads the image into the slot named by `id`.
+    ///
+    /// The runtime issued `id` to game code before this ran, so a failure has
+    /// to leave the handle usable: the slot stays empty and draws against it
+    /// render the checkerboard.
+    pub fn load_texture(&mut self, id: TextureId, bytes: &[u8]) -> Result<(), RedixelError> {
+        self.textures.upload(&self.device.device, &self.device.queue, id, bytes)
     }
 
     /// Drops the presentation surface to yield GPU resources back to the OS.
@@ -122,6 +139,11 @@ impl Renderer {
         self.queue.batch_2d.draw_rect(position, size, color);
     }
 
+    /// Queues a textured rectangle.
+    pub fn draw_sprite(&mut self, position: Vec2, size: Vec2, texture: TextureId, tint: Color) {
+        self.queue.batch_2d.draw_sprite(position, size, texture, tint);
+    }
+
     /// Queues a filled triangle.
     pub fn draw_triangle(&mut self, p1: Vec2, p2: Vec2, p3: Vec2, color: Color) {
         self.queue.batch_2d.draw_triangle(p1, p2, p3, color);
@@ -130,6 +152,13 @@ impl Renderer {
     /// Queues a filled triangle in 3D view space.
     pub fn draw_triangle_3d(&mut self, p1: Vec3, p2: Vec3, p3: Vec3, color: Color) {
         self.queue.batch_3d.draw_triangle_3d(p1, p2, p3, color);
+    }
+
+    /// Queues a textured triangle in 3D view space.
+    pub fn draw_triangle_3d_textured(&mut self, points: [Vec3; 3], uvs: [Vec2; 3], texture: TextureId, tint: Color) {
+        self.queue
+            .batch_3d
+            .draw_triangle_3d_textured(points, uvs, texture, tint);
     }
 
     /// Flushes all queued draw calls and presents the frame.
@@ -194,13 +223,13 @@ impl Renderer {
             pass.set_bind_group(0, &self.pipeline.camera_3d.bind_group, &[]);
             self.queue
                 .batch_3d
-                .flush(&self.device.device, &self.device.queue, &mut pass);
+                .flush(&self.device.device, &self.device.queue, &mut pass, &self.textures);
 
             pass.set_pipeline(&self.pipeline.pipeline_2d);
             pass.set_bind_group(0, &self.pipeline.camera_2d.bind_group, &[]);
             self.queue
                 .batch_2d
-                .flush(&self.device.device, &self.device.queue, &mut pass);
+                .flush(&self.device.device, &self.device.queue, &mut pass, &self.textures);
         }
 
         self.device.queue.submit(std::iter::once(encoder.finish()));
