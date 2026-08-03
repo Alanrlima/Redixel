@@ -24,7 +24,8 @@
 - [ ] **Shaders & Uniforms:** Pass global engine data (Time, Resolution, Camera View) to shaders via Uniform Buffers.
 - [ ] **Camera System:** Implement World-to-Screen coordinate transformation.
 - [ ] **Render Targets / Framebuffers:** Create intermediate textures to allow offscreen rendering, Pixel-Perfect scaling, and Post-Processing.
-- [ ] **Texture Support:** Implement raw image parsing (header reading) and texture upload to GPU.
+- [x] **Texture Support:** PNG decoding via the `image` crate, uploaded to `Rgba8UnormSrgb` textures sampled with `FilterMode::Nearest`. Alpha is blended, and a failed load draws a checkerboard instead of failing.
+- [ ] **Mipmaps:** Generate a mip chain per texture. `FilterMode::Nearest` with no mips keeps pixel art crisp at native scale and above, but a sprite minified below its native size aliases and shimmers as it moves.
 
 ## **Phase 3 — The 2D Renderer (Batching)**
 
