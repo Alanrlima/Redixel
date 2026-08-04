@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),  
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.5.0]
+
+### Fixed
+
+- **Renderer:** the web build no longer dies on browsers that expose `navigator.gpu` without a usable adapter behind it — WebGPU disabled by flag, blocklisted driver, or no GPU at all. WGPU picks its wasm backend from the mere presence of `navigator.gpu` and never falls back, and WGPU 30 reads `requestAdapter()`'s `null` through a `JsOption` that only counts `undefined` as empty, so the null adapter was accepted and the first property read on it threw a JS `TypeError` no Rust code could catch. The renderer now resolves `requestAdapter()` itself before building the instance and drops `Backends::BROWSER_WEBGPU` when it comes back empty, leaving WebGL2 as the candidate instead of a crash.
+
 ## [0.4.0]
 
 ### Added
