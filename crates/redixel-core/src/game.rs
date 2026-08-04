@@ -2,7 +2,7 @@ use winit::{event::MouseButton, keyboard::KeyCode};
 
 use redixel_math::{Color, Vec2, Vec3};
 
-use crate::{InputAction, InputSource, RedixelError, net::NetworkManager};
+use crate::{InputAction, InputSource, RedixelError, net::NetworkManager, texture::TextureId};
 
 /// The entry point for user game logic.
 ///
@@ -142,6 +142,31 @@ pub trait GameContext<A: InputAction> {
     /// Call this in `on_start` to register your input bindings.
     fn input_mut(&mut self) -> &mut dyn InputBind<A>;
 
+    /// Registers an image for loading and returns the handle to draw it with.
+    ///
+    /// The handle comes back immediately but the decode and upload happen later
+    /// in the frame, since the renderer is not reachable from here. Call this
+    /// from `on_start`; a handle is drawable from the frame it was requested in.
+    ///
+    /// A failed decode is **not** an error: it logs a warning and draws the
+    /// missing-texture checkerboard.
+    ///
+    /// `bytes` is the encoded file, not raw pixels. Prefer `include_bytes!`,
+    /// which works identically on desktop, web, and mobile.
+    fn load_texture(&mut self, bytes: &[u8]) -> TextureId;
+
+    /// Reads an image from disk and registers it, as [`load_texture`](Self::load_texture) does.
+    ///
+    /// `path` is resolved **relative to the process's working directory**, the
+    /// same caveat that applies to `config/config.json`. A game that must run
+    /// from anywhere should use `include_bytes!` instead. Unavailable on web,
+    /// which has no filesystem.
+    ///
+    /// An unreadable path logs a warning and still yields a handle, drawn as
+    /// the checkerboard, so game code never has to unwrap a `None`.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn load_texture_file(&mut self, path: &str) -> TextureId;
+
     /// Sets the background clear colour for this frame.
     fn clear_color(&mut self, color: Color);
 
@@ -158,6 +183,24 @@ pub trait GameContext<A: InputAction> {
     /// - `color`    — fill colour
     fn draw_rect(&mut self, position: Vec2, size: Vec2, color: Color);
 
+    /// Draws a texture stretched across an axis-aligned rectangle.
+    ///
+    /// - `position` — top-left corner in world/screen coordinates (y-down)
+    /// - `size`     — width × height in pixels
+    /// - `texture`  — a handle from [`load_texture`](Self::load_texture)
+    ///
+    /// The alpha channel is honoured, so a cut-out sprite blends against
+    /// whatever was drawn before it. Sprites and solid shapes share one painter
+    /// order: whatever is drawn last lands on top.
+    fn draw_sprite(&mut self, position: Vec2, size: Vec2, texture: TextureId);
+
+    /// Draws a texture as [`draw_sprite`](Self::draw_sprite) does, multiplying
+    /// every sampled texel by `tint`.
+    ///
+    /// `Color::WHITE` is the no-op tint. Useful for flashing a sprite on damage
+    /// or fading one out through the tint's alpha.
+    fn draw_sprite_tinted(&mut self, position: Vec2, size: Vec2, texture: TextureId, tint: Color);
+
     /// Draws a filled triangle in 3D view space.
     ///
     /// - `p1`, `p2`, `p3` — the three vertices, in the engine's perspective
@@ -165,6 +208,19 @@ pub trait GameContext<A: InputAction> {
     ///   up (see [`Mat4::perspective`](redixel_math::Mat4::perspective))
     /// - `color`          — fill colour
     fn draw_triangle_3d(&mut self, p1: Vec3, p2: Vec3, p3: Vec3, color: Color);
+
+    /// Draws a textured triangle in 3D view space.
+    ///
+    /// - `points`  — the three vertices, in the perspective camera's view space
+    /// - `uvs`     — where each vertex lands on the texture, `(0, 0)` at the
+    ///   top-left and `(1, 1)` at the bottom-right
+    /// - `texture` — a handle from [`load_texture`](Self::load_texture)
+    fn draw_triangle_3d_textured(&mut self, points: [Vec3; 3], uvs: [Vec2; 3], texture: TextureId);
+
+    /// Draws a textured triangle as
+    /// [`draw_triangle_3d_textured`](Self::draw_triangle_3d_textured) does,
+    /// multiplying every sampled texel by `tint`.
+    fn draw_triangle_3d_textured_tinted(&mut self, points: [Vec3; 3], uvs: [Vec2; 3], texture: TextureId, tint: Color);
 
     /// Extracts any pending engine error out of the context.
     fn take_error(&mut self) -> Option<RedixelError>;

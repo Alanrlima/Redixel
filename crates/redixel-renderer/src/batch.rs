@@ -1,22 +1,28 @@
 use wgpu::{Buffer, BufferDescriptor, BufferUsages, Device, IndexFormat, Queue, RenderPass};
 
+use redixel_core::TextureId;
 use redixel_math::{Color, Vec2, Vec3};
 
-use crate::pipeline::Vertex;
+use crate::{pipeline::Vertex, texture::TextureRegistry};
 
-/// Index pattern for a rectangle, relative to its own first vertex.
-///
-/// Clockwise in world space, which the camera's y-flipping projection turns
-/// into the `FrontFace::Ccw` the shape pipeline declares.
+/// Relative to the rectangle's own first vertex. Clockwise in world space,
+/// which the camera's y-flipping projection turns into the `FrontFace::Ccw`
+/// the shape pipeline declares.
 const RECT_INDICES: [u32; 6] = [0, 2, 1, 1, 2, 3];
 
-/// Index pattern for a standalone triangle, relative to its own first vertex.
 const TRIANGLE_INDICES: [u32; 3] = [0, 1, 2];
 
-/// Builds the four corners of a rectangle in
+/// Untextured geometry samples the registry's 1×1 white pixel, so every corner
+/// collapses onto the same texel and the sample multiplies the colour by one.
+const SOLID_UVS: [[f32; 2]; 4] = [[0.0, 0.0]; 4];
+
+/// Maps a whole texture onto a quad, in the corner order [`quad_vertices`] builds.
+const SPRITE_UVS: [[f32; 2]; 4] = [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]];
+
+/// Builds the four corners of an axis-aligned quad in
 /// `[top-left, top-right, bottom-left, bottom-right]` order, the order
 /// [`RECT_INDICES`] expects.
-fn rect_vertices(position: Vec2, size: Vec2, color: Color) -> [Vertex; 4] {
+fn quad_vertices(position: Vec2, size: Vec2, color: Color, uvs: [[f32; 2]; 4]) -> [Vertex; 4] {
     let x0: f32 = position.x;
     let y0: f32 = position.y;
     let x1: f32 = position.x + size.x;
@@ -27,18 +33,22 @@ fn rect_vertices(position: Vec2, size: Vec2, color: Color) -> [Vertex; 4] {
         Vertex {
             position: [x0, y0, 0.0],
             color: c,
+            uv: uvs[0],
         },
         Vertex {
             position: [x1, y0, 0.0],
             color: c,
+            uv: uvs[1],
         },
         Vertex {
             position: [x0, y1, 0.0],
             color: c,
+            uv: uvs[2],
         },
         Vertex {
             position: [x1, y1, 0.0],
             color: c,
+            uv: uvs[3],
         },
     ]
 }
@@ -51,65 +61,82 @@ fn triangle_vertices(p1: Vec2, p2: Vec2, p3: Vec2, color: Color) -> [Vertex; 3] 
         Vertex {
             position: [p1.x, p1.y, 0.0],
             color: c,
+            uv: SOLID_UVS[0],
         },
         Vertex {
             position: [p2.x, p2.y, 0.0],
             color: c,
+            uv: SOLID_UVS[0],
         },
         Vertex {
             position: [p3.x, p3.y, 0.0],
             color: c,
+            uv: SOLID_UVS[0],
         },
     ]
 }
 
-/// Builds the three corners of a 3D triangle in the order they were given.
+/// Builds the three corners of a 3D triangle in the order they were given,
+/// pairing each with the matching entry of `uvs`.
 ///
 /// The only vertex-building path whose depth isn't hardcoded to zero.
-fn triangle_vertices_3d(p1: Vec3, p2: Vec3, p3: Vec3, color: Color) -> [Vertex; 3] {
+fn triangle_vertices_3d(points: [Vec3; 3], uvs: [Vec2; 3], color: Color) -> [Vertex; 3] {
     let c: [f32; 4] = color.to_array();
 
-    [
-        Vertex {
-            position: p1.to_array(),
-            color: c,
-        },
-        Vertex {
-            position: p2.to_array(),
-            color: c,
-        },
-        Vertex {
-            position: p3.to_array(),
-            color: c,
-        },
-    ]
+    std::array::from_fn(|i: usize| Vertex {
+        position: points[i].to_array(),
+        color: c,
+        uv: [uvs[i].x, uvs[i].y],
+    })
+}
+
+/// A contiguous slice of the index buffer sharing one texture, and so
+/// submittable as a single draw call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DrawRun {
+    texture: Option<TextureId>,
+    start: u32,
+    end: u32,
 }
 
 /// Geometry accumulated on the CPU during a frame.
 ///
-/// Owns no GPU resources, so index rebasing can be exercised without a device.
+/// Owns no GPU resources, so index rebasing and run coalescing can be exercised
+/// without a device.
 #[derive(Default)]
 struct Geometry {
     vertices: Vec<Vertex>,
     indices: Vec<u32>,
+    runs: Vec<DrawRun>,
 }
 
 impl Geometry {
-    /// Appends `vertices` and the `indices` that reference them, rebasing each
-    /// index onto the geometry already queued.
+    /// Appends `vertices` and the `indices` referencing them, rebasing each
+    /// index onto the geometry already queued and recording its texture.
     ///
-    /// Indices are given relative to the primitive's own first vertex, so a
-    /// primitive never has to know how much geometry precedes it. This is the
-    /// only place that offset is computed.
-    fn push(&mut self, vertices: &[Vertex], indices: &[u32]) {
+    /// Indices arrive relative to the primitive's own first vertex, so a
+    /// primitive never has to know how much geometry precedes it; this is the
+    /// only place that offset is computed. Consecutive primitives sharing a
+    /// texture extend the open run rather than opening a new one.
+    fn push(&mut self, vertices: &[Vertex], indices: &[u32], texture: Option<TextureId>) {
         let base: u32 = self.vertices.len() as u32;
+        let start: u32 = self.indices.len() as u32;
+
         self.vertices.extend_from_slice(vertices);
         self.indices.extend(indices.iter().map(|i: &u32| base + i));
+
+        let end: u32 = self.indices.len() as u32;
+
+        match self.runs.last_mut() {
+            Some(run) if run.texture == texture => run.end = end,
+            _ => self.runs.push(DrawRun { texture, start, end }),
+        }
     }
 
     fn clear(&mut self) {
         self.vertices.clear();
         self.indices.clear();
+        self.runs.clear();
     }
 }
 
@@ -131,15 +158,11 @@ fn create_index_buffer(device: &Device, indices: usize) -> Buffer {
     })
 }
 
-/// The GPU-side half of a batch: the buffers queued geometry is uploaded into,
-/// and the indexed draw call that submits it.
+/// The GPU-side half of a batch, shared by [`SpriteBatch`] and [`MeshBatch`].
 ///
-/// Shared by [`SpriteBatch`] and [`MeshBatch`], which accumulate the same
-/// `Vertex` type and differ only in which primitives they accept.
-///
-/// Imposes no ceiling on how much geometry a frame may queue, and reserves
-/// nothing up front: buffers start empty and grow to fit whatever is actually
-/// drawn, so nothing is ever silently dropped.
+/// Imposes no ceiling on how much geometry a frame may queue and reserves
+/// nothing up front: buffers start empty and grow to fit whatever is drawn, so
+/// nothing is ever silently dropped.
 struct GeometryBuffers {
     vertex_buffer: Buffer,
     index_buffer: Buffer,
@@ -149,10 +172,8 @@ struct GeometryBuffers {
 }
 
 impl GeometryBuffers {
-    /// Creates a batch with empty GPU buffers.
-    ///
-    /// The first `flush()` sizes them to the frame that is actually drawn, so
-    /// a game that draws little pays for little.
+    /// The first `flush()` sizes the buffers to the frame actually drawn, so a
+    /// game that draws little pays for little.
     fn new(device: &Device) -> Self {
         Self {
             vertex_buffer: create_vertex_buffer(device, 0),
@@ -163,8 +184,8 @@ impl GeometryBuffers {
         }
     }
 
-    fn push(&mut self, vertices: &[Vertex], indices: &[u32]) {
-        self.geometry.push(vertices, indices);
+    fn push(&mut self, vertices: &[Vertex], indices: &[u32], texture: Option<TextureId>) {
+        self.geometry.push(vertices, indices, texture);
     }
 
     fn unique_vertex_count(&self) -> usize {
@@ -175,14 +196,14 @@ impl GeometryBuffers {
         self.geometry.indices.len()
     }
 
-    /// Uploads queued vertices and indices to the GPU and records the indexed
-    /// draw call.
+    /// Uploads queued geometry and records one indexed draw call per texture
+    /// run. Must be called **inside** an active `RenderPass`; clears the queue.
     ///
-    /// Must be called **inside** an active `RenderPass`.
-    /// Clears the internal queues after submission.
-    fn flush(&mut self, device: &Device, queue: &Queue, pass: &mut RenderPass<'_>) {
-        let count: usize = self.geometry.indices.len();
-        if count == 0 {
+    /// The whole frame travels in two `write_buffer` calls; only the draw is
+    /// split, because a bind group can be swapped between draws but not within
+    /// one.
+    fn flush(&mut self, device: &Device, queue: &Queue, pass: &mut RenderPass<'_>, textures: &TextureRegistry) {
+        if self.geometry.indices.is_empty() {
             return;
         }
 
@@ -193,16 +214,17 @@ impl GeometryBuffers {
 
         pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
         pass.set_index_buffer(self.index_buffer.slice(..), IndexFormat::Uint32);
-        pass.draw_indexed(0..count as u32, 0, 0..1);
+
+        for run in &self.geometry.runs {
+            pass.set_bind_group(1, textures.bind_group(run.texture), &[]);
+            pass.draw_indexed(run.start..run.end, 0, 0..1);
+        }
 
         self.geometry.clear();
     }
 
-    /// Reallocates the GPU buffers when the queued geometry outgrows them.
-    ///
-    /// Capacity climbs straight to the next power of two and never shrinks, so
-    /// a scene whose sprite count oscillates settles after a handful of frames
-    /// and stops reallocating.
+    /// Capacity climbs to the next power of two and never shrinks, so a scene
+    /// whose sprite count oscillates settles and stops reallocating.
     fn reserve(&mut self, device: &Device) {
         let vertices: usize = self.geometry.vertices.len();
         if vertices > self.vertex_capacity {
@@ -218,15 +240,15 @@ impl GeometryBuffers {
     }
 }
 
-/// Accumulates 2D shape draw calls per frame and submits them to the GPU in a
-/// single indexed draw call on `flush()`.
+/// Accumulates 2D shape and sprite draw calls per frame, submitting them in as
+/// few indexed draw calls as the textures allow.
 ///
-/// This is the standard 2D batch-rendering pattern: minimise draw calls by
-/// grouping same-pipeline geometry together.
+/// Solid shapes and sprites share one batch rather than living in two, because
+/// splitting them would split their painter order — a sprite drawn after a
+/// rectangle has to land on top of it.
 ///
-/// Every vertex queued here sits at `z = 0` and is flushed through the pipeline
-/// that neither tests nor writes depth. For depth-tested geometry see
-/// [`MeshBatch`].
+/// Every vertex here sits at `z = 0` and flushes through the pipeline that
+/// neither tests nor writes depth. For depth-tested geometry see [`MeshBatch`].
 pub struct SpriteBatch {
     buffers: GeometryBuffers,
 }
@@ -244,7 +266,19 @@ impl SpriteBatch {
     /// - `size`     — width × height in world units
     /// - `color`    — RGBA fill colour
     pub fn draw_rect(&mut self, position: Vec2, size: Vec2, color: Color) {
-        self.buffers.push(&rect_vertices(position, size, color), &RECT_INDICES);
+        self.buffers
+            .push(&quad_vertices(position, size, color, SOLID_UVS), &RECT_INDICES, None);
+    }
+
+    /// Queues a textured rectangle for drawing.
+    ///
+    /// - `position` — top-left corner in world coordinates (y-down)
+    /// - `size`     — width × height in world units
+    /// - `texture`  — the image to stretch across the quad
+    /// - `tint`     — multiplied into every sampled texel; `Color::WHITE` is the no-op
+    pub fn draw_sprite(&mut self, position: Vec2, size: Vec2, texture: TextureId, tint: Color) {
+        self.buffers
+            .push(&quad_vertices(position, size, tint, SPRITE_UVS), &RECT_INDICES, Some(texture));
     }
 
     /// Queues a filled triangle for drawing.
@@ -253,7 +287,7 @@ impl SpriteBatch {
     /// - `color`          — RGBA fill colour
     pub fn draw_triangle(&mut self, p1: Vec2, p2: Vec2, p3: Vec2, color: Color) {
         self.buffers
-            .push(&triangle_vertices(p1, p2, p3, color), &TRIANGLE_INDICES);
+            .push(&triangle_vertices(p1, p2, p3, color), &TRIANGLE_INDICES, None);
     }
 
     /// Returns the number of unique vertices currently queued — four per
@@ -271,19 +305,19 @@ impl SpriteBatch {
         self.buffers.index_count()
     }
 
-    /// Uploads queued geometry and records the indexed draw call.
+    /// Uploads queued geometry and records the indexed draw calls.
     ///
     /// Must be called **inside** an active `RenderPass`, with the 2D pipeline
     /// and orthographic camera already bound. Clears the queue afterwards.
-    pub fn flush(&mut self, device: &Device, queue: &Queue, pass: &mut RenderPass<'_>) {
-        self.buffers.flush(device, queue, pass);
+    pub fn flush(&mut self, device: &Device, queue: &Queue, pass: &mut RenderPass<'_>, textures: &TextureRegistry) {
+        self.buffers.flush(device, queue, pass, textures);
     }
 }
 
-/// Accumulates 3D triangles per frame and submits them in a single indexed
-/// draw call on `flush()`.
+/// Accumulates 3D triangles per frame, submitting them in as few indexed draw
+/// calls as the textures allow.
 ///
-/// Separate from [`SpriteBatch`] because it is flushed against the perspective
+/// Separate from [`SpriteBatch`] because it flushes against the perspective
 /// camera and the depth-testing pipeline: mixing a `draw_rect` in would put a
 /// pixel-space rectangle through a 3D camera.
 pub struct MeshBatch {
@@ -304,8 +338,22 @@ impl MeshBatch {
     ///   significant; nothing is culled.
     /// - `color`          — RGBA fill colour
     pub fn draw_triangle_3d(&mut self, p1: Vec3, p2: Vec3, p3: Vec3, color: Color) {
+        self.buffers.push(
+            &triangle_vertices_3d([p1, p2, p3], [Vec2::ZERO; 3], color),
+            &TRIANGLE_INDICES,
+            None,
+        );
+    }
+
+    /// Queues a textured triangle in 3D view space.
+    ///
+    /// - `points`  — the three vertices, in the perspective camera's view space
+    /// - `uvs`     — the texture coordinate for each vertex, in the same order
+    /// - `texture` — the image to sample
+    /// - `tint`    — multiplied into every sampled texel; `Color::WHITE` is the no-op
+    pub fn draw_triangle_3d_textured(&mut self, points: [Vec3; 3], uvs: [Vec2; 3], texture: TextureId, tint: Color) {
         self.buffers
-            .push(&triangle_vertices_3d(p1, p2, p3, color), &TRIANGLE_INDICES);
+            .push(&triangle_vertices_3d(points, uvs, tint), &TRIANGLE_INDICES, Some(texture));
     }
 
     /// Returns the number of unique vertices currently queued — three per
@@ -323,12 +371,12 @@ impl MeshBatch {
         self.buffers.index_count()
     }
 
-    /// Uploads queued geometry and records the indexed draw call.
+    /// Uploads queued geometry and records the indexed draw calls.
     ///
     /// Must be called **inside** an active `RenderPass`, with the 3D pipeline
     /// and perspective camera already bound. Clears the queue afterwards.
-    pub fn flush(&mut self, device: &Device, queue: &Queue, pass: &mut RenderPass<'_>) {
-        self.buffers.flush(device, queue, pass);
+    pub fn flush(&mut self, device: &Device, queue: &Queue, pass: &mut RenderPass<'_>, textures: &TextureRegistry) {
+        self.buffers.flush(device, queue, pass, textures);
     }
 }
 
@@ -342,6 +390,10 @@ mod tests {
         vertices.iter().map(|v: &Vertex| v.position).collect()
     }
 
+    fn uvs(vertices: &[Vertex]) -> Vec<[f32; 2]> {
+        vertices.iter().map(|v: &Vertex| v.uv).collect()
+    }
+
     fn project(vertices: &[Vertex]) -> [Vertex; 4] {
         let projection: Mat4 = Mat4::orthographic(0.0, 800.0, 600.0, 0.0, -1.0, 1.0);
 
@@ -352,6 +404,7 @@ mod tests {
                 0.0,
             ],
             color: vertices[i].color,
+            uv: vertices[i].uv,
         })
     }
 
@@ -364,10 +417,18 @@ mod tests {
         (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
     }
 
+    fn solid_rect() -> [Vertex; 4] {
+        quad_vertices(Vec2::ZERO, Vec2::ONE, Color::WHITE, SOLID_UVS)
+    }
+
+    fn sprite_rect() -> [Vertex; 4] {
+        quad_vertices(Vec2::ZERO, Vec2::ONE, Color::WHITE, SPRITE_UVS)
+    }
+
     #[test]
     fn push_leaves_indices_alone_on_empty_geometry() {
         let mut geometry: Geometry = Geometry::default();
-        geometry.push(&rect_vertices(Vec2::ZERO, Vec2::ONE, Color::WHITE), &RECT_INDICES);
+        geometry.push(&solid_rect(), &RECT_INDICES, None);
 
         assert_eq!(geometry.indices, RECT_INDICES.to_vec());
     }
@@ -375,9 +436,9 @@ mod tests {
     #[test]
     fn push_rebases_indices_onto_queued_vertices() {
         let mut geometry: Geometry = Geometry::default();
-        geometry.push(&triangle_vertices(Vec2::ZERO, Vec2::X, Vec2::Y, Color::WHITE), &[0, 1, 2]);
-        geometry.push(&triangle_vertices(Vec2::ONE, Vec2::X, Vec2::Y, Color::RED), &[0, 1, 2]);
-        geometry.push(&triangle_vertices(Vec2::ZERO, Vec2::Y, Vec2::X, Color::BLUE), &[0, 1, 2]);
+        geometry.push(&triangle_vertices(Vec2::ZERO, Vec2::X, Vec2::Y, Color::WHITE), &[0, 1, 2], None);
+        geometry.push(&triangle_vertices(Vec2::ONE, Vec2::X, Vec2::Y, Color::RED), &[0, 1, 2], None);
+        geometry.push(&triangle_vertices(Vec2::ZERO, Vec2::Y, Vec2::X, Color::BLUE), &[0, 1, 2], None);
 
         assert_eq!(geometry.vertices.len(), 9);
         assert_eq!(geometry.indices, vec![0, 1, 2, 3, 4, 5, 6, 7, 8]);
@@ -385,7 +446,7 @@ mod tests {
 
     #[test]
     fn rect_vertices_are_ordered_tl_tr_bl_br() {
-        let vertices: [Vertex; 4] = rect_vertices(Vec2::new(10.0, 20.0), Vec2::new(3.0, 4.0), Color::WHITE);
+        let vertices: [Vertex; 4] = quad_vertices(Vec2::new(10.0, 20.0), Vec2::new(3.0, 4.0), Color::WHITE, SOLID_UVS);
 
         assert_eq!(
             positions(&vertices),
@@ -405,26 +466,20 @@ mod tests {
 
     #[test]
     fn rect_triangles_wind_counter_clockwise_in_ndc() {
-        let vertices: [Vertex; 4] = project(&rect_vertices(Vec2::ZERO, Vec2::ONE, Color::WHITE));
+        let vertices: [Vertex; 4] = project(&solid_rect());
 
         let first: f32 = signed_area(&vertices, &RECT_INDICES, 0);
         let second: f32 = signed_area(&vertices, &RECT_INDICES, 1);
 
-        assert!(
-            first > 0.0,
-            "first triangle is clockwise in NDC; the shape pipeline declares FrontFace::Ccw"
-        );
-        assert!(
-            second > 0.0,
-            "second triangle is clockwise in NDC; the shape pipeline declares FrontFace::Ccw"
-        );
+        assert!(first > 0.0, "the shape pipeline declares FrontFace::Ccw");
+        assert!(second > 0.0, "the shape pipeline declares FrontFace::Ccw");
     }
 
     #[test]
     fn consecutive_rects_offset_their_base_vertex() {
         let mut geometry: Geometry = Geometry::default();
-        geometry.push(&rect_vertices(Vec2::ZERO, Vec2::ONE, Color::WHITE), &RECT_INDICES);
-        geometry.push(&rect_vertices(Vec2::ONE, Vec2::ONE, Color::RED), &RECT_INDICES);
+        geometry.push(&solid_rect(), &RECT_INDICES, None);
+        geometry.push(&solid_rect(), &RECT_INDICES, None);
 
         assert_eq!(geometry.vertices.len(), 8);
         assert_eq!(geometry.indices, vec![0, 2, 1, 1, 2, 3, 4, 6, 5, 5, 6, 7]);
@@ -436,6 +491,7 @@ mod tests {
         geometry.push(
             &triangle_vertices(Vec2::ZERO, Vec2::X, Vec2::Y, Color::WHITE),
             &TRIANGLE_INDICES,
+            None,
         );
 
         assert_eq!(geometry.vertices.len(), 3);
@@ -448,9 +504,14 @@ mod tests {
         geometry.push(
             &triangle_vertices(Vec2::ZERO, Vec2::X, Vec2::Y, Color::WHITE),
             &TRIANGLE_INDICES,
+            None,
         );
-        geometry.push(&rect_vertices(Vec2::ZERO, Vec2::ONE, Color::RED), &RECT_INDICES);
-        geometry.push(&triangle_vertices(Vec2::ONE, Vec2::X, Vec2::Y, Color::BLUE), &TRIANGLE_INDICES);
+        geometry.push(&solid_rect(), &RECT_INDICES, None);
+        geometry.push(
+            &triangle_vertices(Vec2::ONE, Vec2::X, Vec2::Y, Color::BLUE),
+            &TRIANGLE_INDICES,
+            None,
+        );
 
         assert_eq!(geometry.vertices.len(), 10);
         assert_eq!(geometry.indices.len(), 12);
@@ -465,7 +526,7 @@ mod tests {
 
         let mut geometry: Geometry = Geometry::default();
         for _ in 0..QUADS {
-            geometry.push(&rect_vertices(Vec2::ZERO, Vec2::ONE, Color::WHITE), &RECT_INDICES);
+            geometry.push(&solid_rect(), &RECT_INDICES, None);
         }
 
         assert_eq!(geometry.vertices.len(), QUADS * 4);
@@ -476,21 +537,25 @@ mod tests {
     }
 
     #[test]
-    fn clear_resets_both_queues() {
+    fn clear_resets_every_queue() {
         let mut geometry: Geometry = Geometry::default();
-        geometry.push(&rect_vertices(Vec2::ZERO, Vec2::ONE, Color::WHITE), &RECT_INDICES);
+        geometry.push(&solid_rect(), &RECT_INDICES, None);
         geometry.clear();
 
         assert!(geometry.vertices.is_empty());
         assert!(geometry.indices.is_empty());
+        assert!(geometry.runs.is_empty());
     }
 
     #[test]
     fn triangle_vertices_3d_carries_real_depth() {
         let vertices: [Vertex; 3] = triangle_vertices_3d(
-            Vec3::new(0.0, 1.0, 2.0),
-            Vec3::new(-1.0, -1.0, 2.0),
-            Vec3::new(1.0, -1.0, 2.0),
+            [
+                Vec3::new(0.0, 1.0, 2.0),
+                Vec3::new(-1.0, -1.0, 2.0),
+                Vec3::new(1.0, -1.0, 2.0),
+            ],
+            [Vec2::ZERO; 3],
             Color::WHITE,
         );
 
@@ -501,11 +566,131 @@ mod tests {
     fn triangle_3d_pushes_three_sequential_indices() {
         let mut geometry: Geometry = Geometry::default();
         geometry.push(
-            &triangle_vertices_3d(Vec3::ZERO, Vec3::X, Vec3::Y, Color::WHITE),
+            &triangle_vertices_3d([Vec3::ZERO, Vec3::X, Vec3::Y], [Vec2::ZERO; 3], Color::WHITE),
             &TRIANGLE_INDICES,
+            None,
         );
 
         assert_eq!(geometry.vertices.len(), 3);
         assert_eq!(geometry.indices, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn sprite_uvs_map_the_whole_texture_onto_the_quad_corners() {
+        assert_eq!(
+            uvs(&sprite_rect()),
+            vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]],
+            "UVs must follow the tl/tr/bl/br order RECT_INDICES assumes"
+        );
+    }
+
+    #[test]
+    fn solid_geometry_carries_collapsed_uvs() {
+        assert!(
+            uvs(&solid_rect()).iter().all(|uv: &[f32; 2]| *uv == [0.0, 0.0]),
+            "untextured geometry samples a 1x1 white texture; zero keeps the intent obvious"
+        );
+
+        assert!(
+            uvs(&triangle_vertices(Vec2::ZERO, Vec2::X, Vec2::Y, Color::WHITE))
+                .iter()
+                .all(|uv: &[f32; 2]| *uv == [0.0, 0.0])
+        );
+    }
+
+    #[test]
+    fn triangle_vertices_3d_carries_its_uvs() {
+        let vertices: [Vertex; 3] = triangle_vertices_3d(
+            [Vec3::ZERO, Vec3::X, Vec3::Y],
+            [Vec2::ZERO, Vec2::new(1.0, 0.0), Vec2::new(0.5, 1.0)],
+            Color::WHITE,
+        );
+
+        assert_eq!(uvs(&vertices), vec![[0.0, 0.0], [1.0, 0.0], [0.5, 1.0]]);
+    }
+
+    #[test]
+    fn untextured_geometry_collapses_into_one_run() {
+        let mut geometry: Geometry = Geometry::default();
+        for _ in 0..16 {
+            geometry.push(&solid_rect(), &RECT_INDICES, None);
+        }
+
+        assert_eq!(geometry.runs.len(), 1, "a frame with no textures stays one draw call");
+        assert_eq!(geometry.runs[0].start, 0);
+        assert_eq!(geometry.runs[0].end, geometry.indices.len() as u32);
+    }
+
+    #[test]
+    fn consecutive_sprites_sharing_a_texture_collapse_into_one_run() {
+        let texture: TextureId = TextureId::new(3);
+
+        let mut geometry: Geometry = Geometry::default();
+        for _ in 0..8 {
+            geometry.push(&sprite_rect(), &RECT_INDICES, Some(texture));
+        }
+
+        assert_eq!(geometry.runs.len(), 1);
+        assert_eq!(geometry.runs[0].texture, Some(texture));
+    }
+
+    #[test]
+    fn changing_texture_opens_a_new_run() {
+        let first: TextureId = TextureId::new(0);
+        let second: TextureId = TextureId::new(1);
+
+        let mut geometry: Geometry = Geometry::default();
+        geometry.push(&sprite_rect(), &RECT_INDICES, Some(first));
+        geometry.push(&sprite_rect(), &RECT_INDICES, Some(second));
+        geometry.push(&sprite_rect(), &RECT_INDICES, Some(first));
+
+        let textures: Vec<Option<TextureId>> = geometry.runs.iter().map(|r: &DrawRun| r.texture).collect();
+
+        assert_eq!(
+            textures,
+            vec![Some(first), Some(second), Some(first)],
+            "reordering runs to merge them would break painter order"
+        );
+    }
+
+    #[test]
+    fn interleaving_textured_and_untextured_preserves_submission_order() {
+        let texture: TextureId = TextureId::new(7);
+
+        let mut geometry: Geometry = Geometry::default();
+        geometry.push(&solid_rect(), &RECT_INDICES, None);
+        geometry.push(&sprite_rect(), &RECT_INDICES, Some(texture));
+        geometry.push(&solid_rect(), &RECT_INDICES, None);
+
+        let textures: Vec<Option<TextureId>> = geometry.runs.iter().map(|r: &DrawRun| r.texture).collect();
+
+        assert_eq!(textures, vec![None, Some(texture), None]);
+    }
+
+    #[test]
+    fn runs_partition_the_index_buffer() {
+        let texture: TextureId = TextureId::new(2);
+
+        let mut geometry: Geometry = Geometry::default();
+        geometry.push(&solid_rect(), &RECT_INDICES, None);
+        geometry.push(&sprite_rect(), &RECT_INDICES, Some(texture));
+        geometry.push(
+            &triangle_vertices(Vec2::ZERO, Vec2::X, Vec2::Y, Color::WHITE),
+            &TRIANGLE_INDICES,
+            None,
+        );
+
+        let mut cursor: u32 = 0;
+        for run in &geometry.runs {
+            assert_eq!(run.start, cursor, "a gap between runs would drop geometry");
+            assert!(run.end > run.start, "an empty run is a wasted draw call");
+            cursor = run.end;
+        }
+
+        assert_eq!(
+            cursor,
+            geometry.indices.len() as u32,
+            "a short last run would silently drop the tail"
+        );
     }
 }

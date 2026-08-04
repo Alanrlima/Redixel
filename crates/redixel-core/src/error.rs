@@ -50,6 +50,9 @@ pub enum RedixelError {
     #[error("Config parse error: {0}")]
     Config(#[from] serde_json::Error),
 
+    #[error("Texture decode error: {0}")]
+    TextureDecode(String),
+
     #[error("Logger initialization failed: {0}")]
     Logger(String),
 

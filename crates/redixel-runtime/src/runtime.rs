@@ -21,7 +21,7 @@ use redixel_platform::{WindowManager, window::WindowConfig};
 use redixel_renderer::{Renderer, RendererConfig};
 
 use crate::{
-    context::{Context, DrawCommand},
+    context::{Context, DrawCommand, TextureRequest},
     settings::EngineSettings,
     simulation::{SimulationCore, StepFlow},
     time::TimeManager,
@@ -239,7 +239,7 @@ impl<G: Game> Runtime<G> {
         event_loop.exit();
     }
 
-    fn transition_to_running(&mut self, renderer: Renderer, window: WindowManager) -> Result<(), RedixelError> {
+    fn transition_to_running(&mut self, mut renderer: Renderer, window: WindowManager) -> Result<(), RedixelError> {
         window.request_redraw();
 
         let mut time: TimeManager = TimeManager::new();
@@ -254,8 +254,33 @@ impl<G: Game> Runtime<G> {
         let mut sim: SimulationCore<G> = SimulationCore::new(time, context, game);
         sim.start()?;
 
+        Self::upload_textures(&mut renderer, &mut sim.context);
+
         self.state = AppState::Running(Box::new(RunningState { renderer, window, sim }));
         Ok(())
+    }
+
+    /// Hands every queued image to the renderer.
+    ///
+    /// A decode failure is logged and dropped rather than propagated: the
+    /// handle was already issued to game code, and an unfilled slot draws the
+    /// checkerboard. Taking the process down over a bad asset would be a worse
+    /// trade than drawing it loudly.
+    ///
+    /// Called at startup, since `on_start` loads assets before the first frame,
+    /// and again each frame before the draw commands dispatch, so a texture
+    /// requested in `on_update` is resident by that frame's `on_render`.
+    fn upload_textures(renderer: &mut Renderer, context: &mut Context<G::Action>) {
+        for request in context.drain_texture_requests() {
+            let TextureRequest { id, bytes } = request;
+
+            if let Err(e) = renderer.load_texture(id, &bytes) {
+                log::warn!(
+                    "Failed to load texture {}: {e}. Drawing the missing-texture checkerboard.",
+                    id.index()
+                );
+            }
+        }
     }
 
     async fn init_gpu(
@@ -365,6 +390,8 @@ impl<G: Game> Runtime<G> {
 
         state.sim.game.on_render(&mut state.sim.context);
 
+        Self::upload_textures(&mut state.renderer, &mut state.sim.context);
+
         for cmd in state.sim.context.drain_commands() {
             match cmd {
                 DrawCommand::ClearColor(c) => {
@@ -373,11 +400,27 @@ impl<G: Game> Runtime<G> {
                 DrawCommand::Rect { position, size, color } => {
                     state.renderer.draw_rect(position, size, color);
                 }
+                DrawCommand::Sprite {
+                    position,
+                    size,
+                    texture,
+                    tint,
+                } => {
+                    state.renderer.draw_sprite(position, size, texture, tint);
+                }
                 DrawCommand::Triangle { p1, p2, p3, color } => {
                     state.renderer.draw_triangle(p1, p2, p3, color);
                 }
                 DrawCommand::Triangle3d { p1, p2, p3, color } => {
                     state.renderer.draw_triangle_3d(p1, p2, p3, color);
+                }
+                DrawCommand::Triangle3dTextured {
+                    points,
+                    uvs,
+                    texture,
+                    tint,
+                } => {
+                    state.renderer.draw_triangle_3d_textured(points, uvs, texture, tint);
                 }
             }
         }
@@ -490,8 +533,10 @@ mod tests {
 
     use mpsc::TryRecvError;
 
-    use redixel_core::GameContext;
+    use redixel_core::{GameContext, TextureId};
     use redixel_math::{Color, Vec2};
+
+    use crate::context::TextureRequest;
 
     struct Dummy;
     impl Game for Dummy {
@@ -595,5 +640,88 @@ mod tests {
         ctx.update_timing(0.016, 62.5);
         assert!((ctx.delta_time() - 0.016).abs() < 1e-9);
         assert!((ctx.fps() - 62.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn load_texture_assigns_sequential_ids() {
+        let mut ctx: Context<()> = Context::new();
+
+        let first: TextureId = ctx.load_texture(b"first");
+        let second: TextureId = ctx.load_texture(b"second");
+        let third: TextureId = ctx.load_texture(b"third");
+
+        assert_eq!(
+            [first.index(), second.index(), third.index()],
+            [0, 1, 2],
+            "the renderer indexes its slots by id, so they must stay dense and ordered"
+        );
+    }
+
+    #[test]
+    fn load_texture_queues_the_bytes_against_its_id() {
+        let mut ctx: Context<()> = Context::new();
+        let id: TextureId = ctx.load_texture(b"png bytes");
+
+        let requests: Vec<TextureRequest> = ctx.drain_texture_requests().collect();
+
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].id, id);
+        assert_eq!(requests[0].bytes, b"png bytes");
+    }
+
+    #[test]
+    fn texture_requests_drain_once() {
+        let mut ctx: Context<()> = Context::new();
+        ctx.load_texture(b"first");
+        ctx.load_texture(b"second");
+
+        assert_eq!(ctx.drain_texture_requests().count(), 2);
+        assert_eq!(
+            ctx.drain_texture_requests().count(),
+            0,
+            "a second drain would re-upload textures that are already resident"
+        );
+    }
+
+    #[test]
+    fn reset_frame_clears_texture_requests() {
+        let mut ctx: Context<()> = Context::new();
+        ctx.load_texture(b"never drained");
+
+        ctx.reset_frame();
+
+        assert_eq!(
+            ctx.drain_texture_requests().count(),
+            0,
+            "headless never drains the queue; without this it grows forever"
+        );
+    }
+
+    #[test]
+    fn ids_keep_climbing_across_frames() {
+        let mut ctx: Context<()> = Context::new();
+        ctx.load_texture(b"first");
+        ctx.reset_frame();
+
+        let later: TextureId = ctx.load_texture(b"second");
+
+        assert_eq!(later.index(), 1, "reusing an id would alias two images");
+    }
+
+    #[test]
+    fn draw_sprite_defaults_to_an_untinted_white() {
+        let mut ctx: Context<()> = Context::new();
+        let id: TextureId = ctx.load_texture(b"png bytes");
+        ctx.draw_sprite(Vec2::ZERO, Vec2::ONE, id);
+
+        let drained: Vec<DrawCommand> = ctx.drain_commands().collect();
+
+        match drained.as_slice() {
+            [DrawCommand::Sprite { texture, tint, .. }] => {
+                assert_eq!(*texture, id);
+                assert_eq!(*tint, Color::WHITE, "the default tint leaves the image untouched");
+            }
+            other => panic!("expected a single sprite command, got {other:?}"),
+        }
     }
 }
