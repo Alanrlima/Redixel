@@ -10,6 +10,11 @@ use redixel_runtime::{DEFAULT_TICKRATE, EngineSettings, RawBackend, RawPresentMo
 #[cfg(target_os = "android")]
 use winit::platform::android::activity::AndroidApp;
 
+mod entry_point;
+
+#[doc(hidden)]
+pub use entry_point::__private;
+
 pub mod prelude {
     pub use redixel_core::{
         ClientId, Game, GameContext, InputAction, InputSource, KeyCode, KeyState, MouseButton, NetworkChannel,
@@ -114,7 +119,7 @@ pub fn run_android_with<G: Game>(game: G, app: AndroidApp, config: RuntimeConfig
 /// the crate's own `fn main()` — `UIApplicationMain` must be called before
 /// anything else touches UIKit, so call this from a
 /// `#[unsafe(no_mangle)] extern "C" fn` exported for an Xcode project to embed
-/// (see each example's `ios_main`).
+/// (the `ios_main` that [`entry_point!`] generates).
 #[cfg(target_os = "ios")]
 pub fn run_ios<G: Game + 'static>(game: G) -> Result<(), RedixelError> {
     run_ios_with(game, build_config())

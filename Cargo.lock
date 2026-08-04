@@ -78,6 +78,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc7eb209b1518d6bb87b283c20095f5228ecda460da70b44f0802523dea6da04"
 
 [[package]]
+name = "android_log-sys"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "84521a3cf562bc62942e294181d9eef17eb38ceb8c68677bc49f144e4c3d4f8d"
+
+[[package]]
+name = "android_logger"
+version = "0.15.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dbb4e440d04be07da1f1bf44fb4495ebd58669372fe0cffa6e48595ac5bd88a3"
+dependencies = [
+ "android_log-sys",
+ "env_filter 0.1.4",
+ "log",
+]
+
+[[package]]
 name = "android_system_properties"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -280,7 +297,7 @@ dependencies = [
 
 [[package]]
 name = "builder"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -419,6 +436,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4ca0197aee26d1ae37445ee532fefce43251d24cc7c166799f4d46817f1d3973"
 dependencies = [
  "crossbeam-utils",
+]
+
+[[package]]
+name = "console_error_panic_hook"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a06aeb73f470f66dcdbf7223caeebb85984942f22f1adb2a088cf9668146bbbc"
+dependencies = [
+ "cfg-if",
+ "wasm-bindgen",
+]
+
+[[package]]
+name = "console_log"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "86919cef3e37b9356ccf54d4421208c17ecfda01beae61393e7ffd72916c0ef1"
+dependencies = [
+ "log",
+ "web-sys",
 ]
 
 [[package]]
@@ -609,6 +646,16 @@ checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 
 [[package]]
 name = "env_filter"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1bf3c259d255ca70051b30e2e95b5446cdb8949ac4cd22c0d7fd634d89f568e2"
+dependencies = [
+ "log",
+ "regex",
+]
+
+[[package]]
+name = "env_filter"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "900d271a03799a1ee8d1ca9b19893b48ca674a9284fefcfb85f05e74ed314217"
@@ -625,7 +672,7 @@ checksum = "de671bd27a75a797dc9ae289ba1e77276e75e2026408aab65185384e2d5cd3f6"
 dependencies = [
  "anstream",
  "anstyle",
- "env_filter",
+ "env_filter 2.0.0",
  "jiff",
  "log",
 ]
@@ -688,7 +735,7 @@ dependencies = [
 
 [[package]]
 name = "fps-bench"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "env_logger",
  "log",
@@ -1920,20 +1967,26 @@ dependencies = [
 
 [[package]]
 name = "redixel"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
+ "android_logger",
+ "console_error_panic_hook",
+ "console_log",
+ "env_logger",
+ "log",
  "redixel-core",
  "redixel-math",
  "redixel-net",
  "redixel-platform",
  "redixel-renderer",
  "redixel-runtime",
+ "wasm-bindgen",
  "winit",
 ]
 
 [[package]]
 name = "redixel-core"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "log",
  "redixel-math",
@@ -1946,14 +1999,14 @@ dependencies = [
 
 [[package]]
 name = "redixel-math"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "wgpu",
 ]
 
 [[package]]
 name = "redixel-net"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "bytes",
  "js-sys",
@@ -1968,7 +2021,7 @@ dependencies = [
 
 [[package]]
 name = "redixel-platform"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "log",
  "redixel-core",
@@ -1980,7 +2033,7 @@ dependencies = [
 
 [[package]]
 name = "redixel-renderer"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "bytemuck",
  "image",
@@ -1993,7 +2046,7 @@ dependencies = [
 
 [[package]]
 name = "redixel-runtime"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "log",
  "pollster",
