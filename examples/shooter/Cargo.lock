@@ -1436,11 +1436,17 @@ dependencies = [
 name = "redixel"
 version = "0.4.0"
 dependencies = [
+ "android_logger",
+ "console_error_panic_hook",
+ "console_log",
+ "env_logger",
+ "log",
  "redixel-core",
  "redixel-math",
  "redixel-platform",
  "redixel-renderer",
  "redixel-runtime",
+ "wasm-bindgen",
  "winit",
 ]
 
@@ -1687,14 +1693,8 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 name = "shooter"
 version = "0.1.0"
 dependencies = [
- "android_logger",
- "console_error_panic_hook",
- "console_log",
- "env_logger",
  "log",
  "redixel",
- "wasm-bindgen",
- "winit",
 ]
 
 [[package]]

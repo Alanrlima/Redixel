@@ -1436,11 +1436,17 @@ dependencies = [
 name = "redixel"
 version = "0.4.0"
 dependencies = [
+ "android_logger",
+ "console_error_panic_hook",
+ "console_log",
+ "env_logger",
+ "log",
  "redixel-core",
  "redixel-math",
  "redixel-platform",
  "redixel-renderer",
  "redixel-runtime",
+ "wasm-bindgen",
  "winit",
 ]
 
@@ -1920,14 +1926,8 @@ checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
 name = "triangle"
 version = "0.1.0"
 dependencies = [
- "android_logger",
- "console_error_panic_hook",
- "console_log",
- "env_logger",
  "log",
  "redixel",
- "wasm-bindgen",
- "winit",
 ]
 
 [[package]]

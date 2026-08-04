@@ -27,15 +27,3 @@ redixel = { path = "../../crates/redixel" }
 
 # External crates
 log = "0.4"
-
-[target.'cfg(not(any(target_arch = "wasm32", target_os = "android")))'.dependencies]
-env_logger = "0.11"
-
-[target.'cfg(target_arch = "wasm32")'.dependencies]
-console_error_panic_hook = "0.1"
-wasm-bindgen = "0.2"
-console_log = "1.0"
-
-[target.'cfg(target_os = "android")'.dependencies]
-android_logger = "0.15.1"
-winit = { version = "0.31.0-beta.2", features = ["android-native-activity"] }
