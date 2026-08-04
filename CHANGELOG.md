@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),  
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.5.0]
+
+### Added
+
+- **Redixel:** `entry_point!`, a declarative macro that generates every platform entry point from a single invocation — `desktop_main`, the unmangled `android_main` the native-activity glue resolves by symbol, the `extern "C" ios_main` an Xcode target is pointed at, the `#[wasm_bindgen(start)]` function the browser runs on module instantiation, and the `fn main()` the native binary calls. A game now boots on all four platforms without writing a single `#[cfg]`, `extern "C"`, `#[wasm_bindgen(start)]`, or logger initialisation of its own. Optional parameters cover the cases the one-liner cannot express: `config:` for an explicit `RuntimeConfig`, `desktop:` to replace the desktop run step (argv-dependent games choosing between hosting a server and joining one), and `log_tag:` for the Android logcat tag, which was hardcoded to `"REDIXEL_ENGINE"` in every example before.
+
+### Changed
+
+- **Examples:** every example boots through `redixel::entry_point!`. Each `lib.rs` lost the ~45-line block of per-platform entry points it carried — byte-for-byte identical across `pong`, `triangle`, `triangle_3d`, `sprite`, and `shooter` — each `main.rs` is now a three-line call with no `#[cfg]`, and each `Cargo.toml` dropped its three `[target.'cfg(...)'.dependencies]` blocks. `shooter_mp` keeps only what is genuinely its own: argv parsing and the headless server (`src/native.rs`), and the fixed server address the argv-less platforms need (`src/preset.rs`).
+- **Redixel:** the crate owns the platform glue the entry points need — `env_logger` on desktop, `android_logger` on Android, `console_log`/`console_error_panic_hook`/`wasm-bindgen` on the web — target-gated and re-exported through a hidden module, so a game depends on `redixel` alone. The cost is that `env_logger` is now in the dependency graph of every desktop consumer, including headless servers.
+- **`shooter_mp`:** the desktop entry is named `desktop_main` like every other example's, not `native_main`.
+
 ## [0.4.0]
 
 ### Added
