@@ -2092,9 +2092,12 @@ version = "0.5.0"
 dependencies = [
  "bytemuck",
  "image",
+ "js-sys",
  "log",
  "redixel-core",
  "redixel-math",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
  "wgpu",
  "winit",
 ]
