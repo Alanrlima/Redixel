@@ -2,7 +2,9 @@ use std::net::SocketAddr;
 
 use redixel::prelude::{HeadlessRuntime, NetConfig, RedixelError, RuntimeConfig};
 
-use crate::{DEFAULT_PORT, client::Client, server::Server};
+use crate::{client::Client, server::Server};
+
+const DEFAULT_PORT: u16 = 5000;
 
 /// Desktop is the only platform with argv, so it is the only one that can pick
 /// between hosting the authoritative server and joining one. `entry_point!`

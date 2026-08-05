@@ -8,8 +8,6 @@ mod native;
 #[cfg(any(target_os = "android", target_os = "ios", target_arch = "wasm32"))]
 mod preset;
 
-pub const DEFAULT_PORT: u16 = 5000;
-
 redixel::entry_point! {
     game: preset::client(),
     config: preset::config(),
