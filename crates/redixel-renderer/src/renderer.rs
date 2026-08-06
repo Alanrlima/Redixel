@@ -3,8 +3,8 @@ use std::sync::Arc;
 use wgpu::{
     Backends, CommandEncoder, CommandEncoderDescriptor,
     CurrentSurfaceTexture::{Lost, Occluded, Outdated, Suboptimal, Success, Timeout, Validation},
-    LoadOp, Operations, PresentMode, RenderPass, RenderPassColorAttachment, RenderPassDescriptor, StoreOp, Surface,
-    SurfaceTexture, TextureView, TextureViewDescriptor,
+    LoadOp, Operations, PresentMode, RenderPass, RenderPassColorAttachment, RenderPassDepthStencilAttachment,
+    RenderPassDescriptor, StoreOp, Surface, SurfaceTexture, TextureView, TextureViewDescriptor,
 };
 
 use winit::{
@@ -12,10 +12,19 @@ use winit::{
     window::{self, Window},
 };
 
-use redixel_core::RedixelError;
-use redixel_math::{Color, Mat4, Vec2};
+use redixel_core::{RedixelError, TextureId};
+use redixel_math::{Color, Mat4, Vec2, Vec3};
 
-use crate::{batch::SpriteBatch, device::GpuDevice, pipeline::ShapePipeline};
+use crate::{
+    batch::{MeshBatch, SpriteBatch},
+    device::GpuDevice,
+    pipeline::ShapePipeline,
+    texture::TextureRegistry,
+};
+
+const CAMERA_FOV_Y_DEGREES: f32 = 60.0;
+const CAMERA_NEAR: f32 = 0.1;
+const CAMERA_FAR: f32 = 100.0;
 
 /// All renderer settings resolved from `config.json` by `redixel-runtime`
 /// and injected at construction time. The renderer never touches the config system.
@@ -37,7 +46,8 @@ impl Default for RendererConfig {
 /// Commands collected during `on_render`, submitted to the GPU in one pass.
 pub struct DrawQueue {
     pub clear: Color,
-    pub batch: SpriteBatch,
+    pub batch_2d: SpriteBatch,
+    pub batch_3d: MeshBatch,
 }
 
 /// High-level renderer. Owns the GPU device, shape pipeline, and sprite batch.
@@ -49,23 +59,41 @@ pub struct DrawQueue {
 pub struct Renderer {
     device: GpuDevice,
     pipeline: ShapePipeline,
+    textures: TextureRegistry,
     queue: DrawQueue,
 }
 
 impl Renderer {
+    /// The registry is built before the pipelines because it owns the layout
+    /// of bind group 1, which those pipelines declare.
     pub async fn new(window: Arc<dyn Window>, config: RendererConfig) -> Result<Self, RedixelError> {
         let device: GpuDevice = GpuDevice::new(window, &config).await?;
-        let pipeline: ShapePipeline = ShapePipeline::new(&device.device, device.config.format);
-        let batch: SpriteBatch = SpriteBatch::new(&device.device);
+
+        let textures: TextureRegistry = TextureRegistry::new(&device.device, &device.queue);
+        let pipeline: ShapePipeline = ShapePipeline::new(&device.device, device.config.format, textures.layout());
+
+        let batch_2d: SpriteBatch = SpriteBatch::new(&device.device);
+        let batch_3d: MeshBatch = MeshBatch::new(&device.device);
 
         Ok(Self {
             device,
             pipeline,
+            textures,
             queue: DrawQueue {
                 clear: Color::rgb(0.1, 0.2, 0.3),
-                batch,
+                batch_2d,
+                batch_3d,
             },
         })
+    }
+
+    /// Decodes `bytes` and uploads the image into the slot named by `id`.
+    ///
+    /// The runtime issued `id` to game code before this ran, so a failure has
+    /// to leave the handle usable: the slot stays empty and draws against it
+    /// render the checkerboard.
+    pub fn load_texture(&mut self, id: TextureId, bytes: &[u8]) -> Result<(), RedixelError> {
+        self.textures.upload(&self.device.device, &self.device.queue, id, bytes)
     }
 
     /// Drops the presentation surface to yield GPU resources back to the OS.
@@ -108,28 +136,54 @@ impl Renderer {
 
     /// Queues a filled rectangle.
     pub fn draw_rect(&mut self, position: Vec2, size: Vec2, color: Color) {
-        self.queue.batch.draw_rect(position, size, color);
+        self.queue.batch_2d.draw_rect(position, size, color);
+    }
+
+    /// Queues a textured rectangle.
+    pub fn draw_sprite(&mut self, position: Vec2, size: Vec2, texture: TextureId, tint: Color) {
+        self.queue.batch_2d.draw_sprite(position, size, texture, tint);
     }
 
     /// Queues a filled triangle.
     pub fn draw_triangle(&mut self, p1: Vec2, p2: Vec2, p3: Vec2, color: Color) {
-        self.queue.batch.draw_triangle(p1, p2, p3, color);
+        self.queue.batch_2d.draw_triangle(p1, p2, p3, color);
+    }
+
+    /// Queues a filled triangle in 3D view space.
+    pub fn draw_triangle_3d(&mut self, p1: Vec3, p2: Vec3, p3: Vec3, color: Color) {
+        self.queue.batch_3d.draw_triangle_3d(p1, p2, p3, color);
+    }
+
+    /// Queues a textured triangle in 3D view space.
+    pub fn draw_triangle_3d_textured(&mut self, points: [Vec3; 3], uvs: [Vec2; 3], texture: TextureId, tint: Color) {
+        self.queue
+            .batch_3d
+            .draw_triangle_3d_textured(points, uvs, texture, tint);
     }
 
     /// Flushes all queued draw calls and presents the frame.
     ///
-    /// 1. Uploads the orthographic camera matrix
-    /// 2. Begins the render pass (clear)
-    /// 3. Flushes the sprite batch (one draw call)
+    /// 1. Uploads the orthographic and perspective camera matrices
+    /// 2. Begins the render pass (clear colour + depth)
+    /// 3. Flushes the 3D batch, then the 2D batch, each with its own pipeline
+    ///    and camera
     /// 4. Submits commands and presents
+    ///
+    /// 3D goes first so 2D lands on top of the finished scene and blends
+    /// against it rather than against the clear colour.
     pub fn render(&mut self) -> Result<(), RedixelError> {
         let Some(surface) = &self.device.surface else {
             return Ok(());
         };
 
         let (w, h): (u32, u32) = self.surface_size();
-        let projection: Mat4 = Mat4::orthographic(0.0, w as f32, h as f32, 0.0, -1.0, 1.0);
-        self.pipeline.update_camera(&self.device.queue, projection.cols);
+
+        let ortho: Mat4 = Mat4::orthographic(0.0, w as f32, h as f32, 0.0, -1.0, 1.0);
+        self.pipeline.camera_2d.update(&self.device.queue, ortho.cols);
+
+        let aspect: f32 = w as f32 / h as f32;
+        let perspective: Mat4 = Mat4::perspective(CAMERA_FOV_Y_DEGREES.to_radians(), aspect, CAMERA_NEAR, CAMERA_FAR);
+        self.pipeline.camera_3d.update(&self.device.queue, perspective.cols);
 
         let output: SurfaceTexture = Self::get_surface_texture(surface)?;
         let view: TextureView = output.texture.create_view(&TextureViewDescriptor::default());
@@ -152,15 +206,30 @@ impl Renderer {
                         store: StoreOp::Store,
                     },
                 })],
-                depth_stencil_attachment: None,
+                depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
+                    view: &self.device.depth_view,
+                    depth_ops: Some(Operations {
+                        load: LoadOp::Clear(1.0),
+                        store: StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
                 occlusion_query_set: None,
                 timestamp_writes: None,
                 ..Default::default()
             });
 
-            pass.set_pipeline(&self.pipeline.pipeline);
-            pass.set_bind_group(0, &self.pipeline.camera_bind_group, &[]);
-            self.queue.batch.flush(&self.device.queue, &mut pass);
+            pass.set_pipeline(&self.pipeline.pipeline_3d);
+            pass.set_bind_group(0, &self.pipeline.camera_3d.bind_group, &[]);
+            self.queue
+                .batch_3d
+                .flush(&self.device.device, &self.device.queue, &mut pass, &self.textures);
+
+            pass.set_pipeline(&self.pipeline.pipeline_2d);
+            pass.set_bind_group(0, &self.pipeline.camera_2d.bind_group, &[]);
+            self.queue
+                .batch_2d
+                .flush(&self.device.device, &self.device.queue, &mut pass, &self.textures);
         }
 
         self.device.queue.submit(std::iter::once(encoder.finish()));

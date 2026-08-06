@@ -254,7 +254,7 @@ jobs:
     name: FPS Benchmark
     needs: format
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
     permissions:
       issues: write
       pull-requests: write
@@ -286,22 +286,23 @@ jobs:
         run: |
           {
             echo "<h3 align=\"center\">FPS Benchmark</h3>"
-            echo "<p align=\"center\"><sub>Measures CPU-side engine cost (batching, frame loop) under a software-rendered GPU — not representative of real hardware FPS.</sub></p>"
+            echo "<p align=\"center\"><sub>Measures CPU-side engine cost (batching, frame loop) under a software-rendered GPU — not representative of real hardware FPS. See the job log for the adapter actually used.</sub></p>"
             echo
             echo "<table align=\"center\">"
-            echo "<thead><tr><th align=\"center\">Scene</th><th align=\"center\">Avg FPS</th><th align=\"center\">Avg Frame Time (ms)</th><th align=\"center\">P95 Frame Time (ms)</th><th align=\"center\">Allocations</th></tr></thead>"
+            echo "<thead><tr><th align=\"center\">Scene</th><th align=\"center\">Median FPS</th><th align=\"center\">Spread</th><th align=\"center\">Frame Time (ms)</th><th align=\"center\">P95 Frame Time (ms)</th><th align=\"center\">Allocations</th></tr></thead>"
             echo "<tbody>"
-            jq -r '.tiers[] | "<tr><td align=\"center\">\(.scene)</td><td align=\"center\"><strong>\(.avg_fps)</strong></td><td align=\"center\">\(.avg_frame_ms)</td><td align=\"center\">\(.p95_frame_ms)</td><td align=\"center\">\(.allocations) (\(.allocated_bytes) B)</td></tr>"' benchmark_result.json
+            jq -r '.tiers[] | "<tr><td align=\"center\">\(.scene)</td><td align=\"center\"><strong>\(.median_fps)</strong></td><td align=\"center\">\(.spread_pct)% (\(.fps_min)–\(.fps_max))</td><td align=\"center\">\(.median_frame_ms)</td><td align=\"center\">\(.median_p95_frame_ms)</td><td align=\"center\">\(.allocations) (\(.allocated_bytes) B)</td></tr>"' benchmark_result.json
             echo "</tbody>"
             echo "</table>"
             echo
-            echo "<p align=\"center\"><sub>Marginal cost: <strong>$(jq -r '.marginal_ms_per_1000_quads' benchmark_result.json) ms</strong> per 1000 additional quads · P95 surfaces stutter an average would hide · allocations counted only during the sampled window.</sub></p>"
+            echo "<p align=\"center\"><sub>Median of $(jq -r '.rounds' benchmark_result.json) rounds per tier, $(jq -r '.measure_frames' benchmark_result.json) frames each after a warmup of at least $(jq -r '.warmup_ms' benchmark_result.json) ms and $(jq -r '.warmup_frames' benchmark_result.json) frames, tiers interleaved · Marginal cost: <strong>$(jq -r '.marginal_ms_per_1000_quads' benchmark_result.json) ms</strong> per 1000 additional quads · <strong>Spread is how far apart identical runs landed — treat any FPS delta below it as noise</strong> · allocations are deterministic and the most reliable column here.</sub></p>"
           } > benchmark_summary.md
 
       - name: Show Results in Job Summary
         run: cat benchmark_summary.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Comment Results on PR
+        continue-on-error: true
         run: gh pr comment "${{ github.event.pull_request.number }}" --edit-last --create-if-none --body-file benchmark_summary.md
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

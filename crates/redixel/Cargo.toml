@@ -12,15 +12,25 @@ net = ["dep:redixel-net", "redixel-runtime/net"]
 
 [dependencies]
 # Internal crates
-redixel-core = { workspace = true }
-redixel-math = { workspace = true }
+redixel-core = { workspace = true, features = ["wgpu"] }
+redixel-math = { workspace = true, features = ["wgpu"] }
 redixel-platform = { workspace = true }
 redixel-renderer = { workspace = true }
 redixel-runtime = { workspace = true }
 redixel-net = { workspace = true, optional = true }
 
 # External crates
+log = { workspace = true }
 winit = { workspace = true }
+
+[target.'cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))'.dependencies]
+env_logger = { workspace = true }
 
 [target.'cfg(target_os = "android")'.dependencies]
 winit = { workspace = true, features = ["android-native-activity"] }
+android_logger = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+console_error_panic_hook = { workspace = true }
+console_log = { workspace = true }
+wasm-bindgen = { workspace = true }

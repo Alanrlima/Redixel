@@ -57,9 +57,9 @@ impl Agent {
     /// Spawns a fresh agent for `id` at `(x, y)` with the default pistol loadout.
     fn new(id: usize, x: f32, y: f32, is_player: bool) -> Self {
         let agent_color: Color = if is_player {
-            Color::from_rgba8(50, 150, 255, 255)
+            Color::from_rgba8(122, 202, 255, 255)
         } else {
-            Color::from_rgba8(255, 50, 50, 255)
+            Color::from_rgba8(255, 122, 122, 255)
         };
 
         Self {
@@ -282,11 +282,11 @@ impl Shooter {
 
             if agent.dash_cooldown > 0.8 && (self.time_since_start * 20.0).fract() < (dt * 20.0) {
                 let (r, g, b): (u8, u8, u8) = if agent.rapid_fire_timer > 0.0 {
-                    (255, 200, 50)
+                    (255, 229, 122)
                 } else if agent.is_player {
-                    (50, 150, 255)
+                    (122, 202, 255)
                 } else {
-                    (255, 50, 50)
+                    (255, 122, 122)
                 };
 
                 self.fx.spawn_afterimage(agent.pos, ENTITY_SIZE, (r, g, b));
@@ -321,9 +321,9 @@ impl Shooter {
                     self.fx.add_shake(5.0);
 
                     let particle_color: (u8, u8, u8) = if agent.rapid_fire_timer > 0.0 {
-                        (255, 200, 50)
+                        (255, 229, 122)
                     } else {
-                        (50, 150, 255)
+                        (122, 202, 255)
                     };
 
                     self.fx.spawn_burst(ParticleProps {
@@ -556,7 +556,7 @@ impl Shooter {
 
                     self.fx.spawn_burst(ParticleProps {
                         pos: agent.pos + Vec2::splat(ENTITY_SIZE / 2.0),
-                        color: (255, 50, 50),
+                        color: (255, 122, 122),
                         count: 12,
                         speed: 250.0,
                         seed: self.time_since_start,
@@ -567,7 +567,7 @@ impl Shooter {
                     if agent.health <= 0 {
                         self.fx.spawn_burst(ParticleProps {
                             pos: agent.pos + Vec2::splat(ENTITY_SIZE / 2.0),
-                            color: (255, 30, 30),
+                            color: (255, 96, 96),
                             count: 40,
                             speed: 400.0,
                             seed: self.time_since_start,
@@ -612,7 +612,7 @@ impl Shooter {
 
                         self.fx.spawn_burst(ParticleProps {
                             pos: pos_i + Vec2::splat(size_i / 2.0),
-                            color: (255, 255, 100),
+                            color: (255, 255, 168),
                             count: 6,
                             speed: 150.0,
                             seed: self.time_since_start,
@@ -690,7 +690,7 @@ impl Shooter {
             let agent: &Agent = &self.agents[i];
 
             let color: Color = if agent.rapid_fire_timer > 0.0 {
-                Color::from_rgba8(255, 200, 50, 255)
+                Color::from_rgba8(255, 229, 122, 255)
             } else {
                 agent.color
             };

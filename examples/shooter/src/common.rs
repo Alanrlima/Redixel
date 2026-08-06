@@ -35,9 +35,9 @@ pub fn rotate_vec(v: Vec2, angle: f32) -> Vec2 {
 pub fn get_weapon_color(weapon: WeaponType) -> (u8, u8, u8) {
     match weapon {
         WeaponType::Pistol => (255, 255, 0),
-        WeaponType::Shotgun => (255, 165, 0),
-        WeaponType::Flamethrower => (255, 70, 0),
-        WeaponType::Homing => (50, 255, 255),
+        WeaponType::Shotgun => (255, 210, 0),
+        WeaponType::Flamethrower => (255, 143, 0),
+        WeaponType::Homing => (122, 255, 255),
     }
 }
 

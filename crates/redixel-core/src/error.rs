@@ -1,25 +1,31 @@
 use thiserror::Error;
-use wgpu::{CreateSurfaceError, RequestAdapterError, RequestDeviceError};
 use winit::error::{EventLoopError, RequestError};
 
-#[cfg(target_os = "windows")]
+#[cfg(feature = "wgpu")]
+use wgpu::{CreateSurfaceError, RequestAdapterError, RequestDeviceError};
+
+#[cfg(all(target_os = "windows", feature = "wgpu"))]
 use wgpu::rwh::HandleError;
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsValue;
 
 #[derive(Error, Debug)]
+#[non_exhaustive]
 pub enum RedixelError {
+    #[cfg(feature = "wgpu")]
     #[error("Failed to create rendering surface: {0}")]
     CreateSurface(#[from] CreateSurfaceError),
 
-    #[cfg(target_os = "windows")]
+    #[cfg(all(target_os = "windows", feature = "wgpu"))]
     #[error("Failed to acquire raw window handle: {0}")]
     WindowHandle(#[from] HandleError),
 
+    #[cfg(feature = "wgpu")]
     #[error("Failed to find a suitable graphics adapter: {0}")]
     RequestAdapter(#[from] RequestAdapterError),
 
+    #[cfg(feature = "wgpu")]
     #[error("Failed to create graphics device: {0}")]
     RequestDevice(#[from] RequestDeviceError),
 
@@ -43,6 +49,9 @@ pub enum RedixelError {
 
     #[error("Config parse error: {0}")]
     Config(#[from] serde_json::Error),
+
+    #[error("Texture decode error: {0}")]
+    TextureDecode(String),
 
     #[error("Logger initialization failed: {0}")]
     Logger(String),

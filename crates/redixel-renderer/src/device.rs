@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
 use wgpu::{
-    Adapter, BackendOptions, Backends, Device, ExperimentalFeatures, Features, Instance, InstanceDescriptor,
-    InstanceFlags, MemoryBudgetThresholds, MemoryHints, PowerPreference, PresentMode, Queue, RequestAdapterOptions,
-    Surface, SurfaceCapabilities, SurfaceColorSpace, SurfaceConfiguration, TextureFormat, TextureUsages, Trace,
+    Adapter, AdapterInfo, BackendOptions, Backends, Device, ExperimentalFeatures, Extent3d, Features, Instance,
+    InstanceDescriptor, InstanceFlags, MemoryBudgetThresholds, MemoryHints, PowerPreference, PresentMode, Queue,
+    RequestAdapterOptions, Surface, SurfaceCapabilities, SurfaceColorSpace, SurfaceConfiguration, Texture,
+    TextureDescriptor, TextureDimension, TextureFormat, TextureUsages, TextureView, TextureViewDescriptor, Trace,
     wgt::{DeviceDescriptor, SurfaceConfiguration as WgtSurfaceConfiguration},
 };
 
@@ -12,6 +13,8 @@ use winit::{dpi::PhysicalSize, window::Window};
 use redixel_core::RedixelError;
 
 use crate::renderer::RendererConfig;
+
+pub(crate) const DEPTH_FORMAT: TextureFormat = TextureFormat::Depth32Float;
 
 /// Owns the WGPU logical device, presentation surface, and submission queue.
 ///
@@ -25,17 +28,24 @@ pub(crate) struct GpuDevice {
     pub(crate) device: Device,
     pub(crate) queue: Queue,
     pub(crate) config: SurfaceConfiguration,
+    pub(crate) depth_view: TextureView,
 }
 
 impl GpuDevice {
     pub(crate) async fn new(window: Arc<dyn Window>, cfg: &RendererConfig) -> Result<Self, RedixelError> {
-        let instance: Instance = Self::create_instance(cfg.backends);
+        let backends: Backends = Self::resolve_backends(cfg.backends).await;
+        let instance: Instance = Self::create_instance(backends);
         let surface: Surface<'_> = Self::create_surface(&instance, &window)?;
         let adapter: Adapter = Self::request_adapter(&instance, &surface).await?;
+
         let (device, queue): (Device, Queue) = Self::request_device(&adapter).await?;
         let config: WgtSurfaceConfiguration<Vec<TextureFormat>> =
             Self::build_surface_config(&window, &surface, &adapter, cfg.present_mode);
+
         surface.configure(&device, &config);
+        Self::log_adapter(&adapter);
+
+        let depth_view: TextureView = Self::create_depth_view(&device, config.width, config.height);
 
         Ok(Self {
             device,
@@ -43,11 +53,16 @@ impl GpuDevice {
             config,
             instance,
             surface: Some(surface),
+            depth_view,
         })
     }
 
     /// Reconfigures the swap chain to match a new window size.
     /// No-ops for zero-area sizes (minimised window).
+    ///
+    /// The depth attachment is rebuilt alongside it: WGPU requires every
+    /// attachment in a render pass to share one resolution, so a depth buffer
+    /// left at the old size fails validation on the next draw.
     pub(crate) fn resize(&mut self, new_size: PhysicalSize<u32>) {
         if new_size.width == 0 || new_size.height == 0 {
             return;
@@ -59,6 +74,8 @@ impl GpuDevice {
         if let Some(surface) = &self.surface {
             surface.configure(&self.device, &self.config);
         }
+
+        self.depth_view = Self::create_depth_view(&self.device, self.config.width, self.config.height);
     }
 
     /// Drops the surface when the application is suspended.
@@ -77,6 +94,85 @@ impl GpuDevice {
         }
 
         Ok(())
+    }
+
+    /// Narrows the requested backend set to what the target can actually serve.
+    ///
+    /// Native targets take the set as given: WGPU enumerates every compiled-in
+    /// backend at adapter-request time and picks across all of them.
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn resolve_backends(requested: Backends) -> Backends {
+        requested
+    }
+
+    /// Drops `BROWSER_WEBGPU` when the browser exposes `navigator.gpu` but has
+    /// no adapter behind it.
+    ///
+    /// `Instance::new` commits to the WebGPU backend on the mere presence of
+    /// `navigator.gpu` and never falls back afterwards, so a browser with
+    /// WebGPU disabled, blocklisted, or unbacked by a usable GPU would never
+    /// reach the WebGL2 path. Worse, WGPU 30 reads `requestAdapter()`'s `null`
+    /// through `JsOption`, which only recognises `undefined` as empty, so the
+    /// null adapter is accepted and the first property access on it throws an
+    /// unrecoverable JS `TypeError`. Probing here keeps that null inside JS and
+    /// leaves `Backends::GL` as the only candidate, routing the instance
+    /// through `wgpu-core`.
+    #[cfg(target_arch = "wasm32")]
+    async fn resolve_backends(requested: Backends) -> Backends {
+        if !requested.contains(Backends::BROWSER_WEBGPU) || Self::webgpu_adapter_available().await {
+            return requested;
+        }
+
+        log::warn!("No WebGPU adapter available. Falling back to WebGL2.");
+        requested.difference(Backends::BROWSER_WEBGPU)
+    }
+
+    /// Resolves `navigator.gpu.requestAdapter()` and reports whether it yielded
+    /// an actual adapter.
+    ///
+    /// Reached through `Reflect` rather than `web-sys` on purpose: the typed
+    /// WebGPU bindings sit behind the `web_sys_unstable_apis` cfg, and this
+    /// probe must not add that constraint to every downstream build. Any
+    /// missing property, thrown call, or rejected promise counts as "no
+    /// adapter" — all of them mean the WebGPU backend cannot serve this page.
+    #[cfg(target_arch = "wasm32")]
+    async fn webgpu_adapter_available() -> bool {
+        use js_sys::{Function, Promise, Reflect};
+        use wasm_bindgen::{JsCast, JsValue};
+        use wasm_bindgen_futures::JsFuture;
+
+        fn property(target: &JsValue, key: &str) -> Option<JsValue> {
+            Reflect::get(target, &JsValue::from_str(key))
+                .ok()
+                .filter(|value: &JsValue| !value.is_undefined() && !value.is_null())
+        }
+
+        let global: JsValue = js_sys::global().into();
+        let Some(navigator) = property(&global, "navigator") else {
+            return false;
+        };
+
+        let Some(gpu) = property(&navigator, "gpu") else {
+            return false;
+        };
+
+        let Some(request) =
+            property(&gpu, "requestAdapter").and_then(|value: JsValue| value.dyn_into::<Function>().ok())
+        else {
+            return false;
+        };
+
+        let Some(promise) = request
+            .call0(&gpu)
+            .ok()
+            .and_then(|value: JsValue| value.dyn_into::<Promise>().ok())
+        else {
+            return false;
+        };
+
+        JsFuture::from(promise)
+            .await
+            .is_ok_and(|adapter: JsValue| !adapter.is_undefined() && !adapter.is_null())
     }
 
     fn create_instance(backends: Backends) -> Instance {
@@ -115,6 +211,37 @@ impl GpuDevice {
         instance.create_surface(window.clone()).map_err(RedixelError::from)
     }
 
+    /// Reports which GPU actually backs this session.
+    ///
+    /// Worth logging unconditionally: a software rasteriser (llvmpipe,
+    /// lavapipe) is selected silently when no hardware adapter is present, and
+    /// any timing measured against it says nothing about real hardware. Name
+    /// and driver strings arrive blank under WebGPU — browsers withhold them
+    /// to limit fingerprinting — so blanks are substituted or dropped instead
+    /// of logging empty text.
+    fn log_adapter(adapter: &Adapter) {
+        let info: AdapterInfo = adapter.get_info();
+
+        let name: &str = match info.name.trim() {
+            "" => "unidentified adapter",
+            name => name,
+        };
+
+        let driver: String = format!("{} {}", info.driver.trim(), info.driver_info.trim())
+            .trim()
+            .to_string();
+
+        if driver.is_empty() {
+            log::info!("GPU adapter: {name} [{:?} / {:?}]", info.device_type, info.backend);
+        } else {
+            log::info!(
+                "GPU adapter: {name} [{:?} / {:?}] driver: {driver}",
+                info.device_type,
+                info.backend
+            );
+        }
+    }
+
     async fn request_adapter(instance: &Instance, surface: &Surface<'static>) -> Result<Adapter, RedixelError> {
         instance
             .request_adapter(&RequestAdapterOptions {
@@ -139,6 +266,28 @@ impl GpuDevice {
             })
             .await
             .map_err(RedixelError::from)
+    }
+
+    /// Creates a `Depth32Float` texture sized to match the colour attachment
+    /// and returns the view the render pass binds. The view keeps the texture
+    /// alive, and nothing samples or copies the depth buffer.
+    fn create_depth_view(device: &Device, width: u32, height: u32) -> TextureView {
+        let texture: Texture = device.create_texture(&TextureDescriptor {
+            label: Some("REDIXEL_DEPTH_TEXTURE"),
+            size: Extent3d {
+                width: width.max(1),
+                height: height.max(1),
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: DEPTH_FORMAT,
+            usage: TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+
+        texture.create_view(&TextureViewDescriptor::default())
     }
 
     fn build_surface_config(

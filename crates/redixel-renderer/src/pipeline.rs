@@ -1,28 +1,39 @@
 use wgpu::{
     BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry,
     BindingResource, BindingType, BlendState, Buffer, BufferBindingType, BufferDescriptor, BufferUsages,
-    ColorTargetState, ColorWrites, Device, FragmentState, FrontFace, MultisampleState, PipelineLayout,
-    PipelineLayoutDescriptor, PolygonMode, PrimitiveState, PrimitiveTopology, Queue, RenderPipeline,
-    RenderPipelineDescriptor, ShaderModule, ShaderModuleDescriptor, ShaderSource, ShaderStages, TextureFormat,
-    VertexAttribute, VertexBufferLayout, VertexState, VertexStepMode,
+    ColorTargetState, ColorWrites, CompareFunction, DepthBiasState, DepthStencilState, Device, FragmentState,
+    FrontFace, MultisampleState, PipelineLayout, PipelineLayoutDescriptor, PolygonMode, PrimitiveState,
+    PrimitiveTopology, Queue, RenderPipeline, RenderPipelineDescriptor, ShaderModule, ShaderModuleDescriptor,
+    ShaderSource, ShaderStages, StencilState, TextureFormat, VertexAttribute, VertexBufferLayout, VertexState,
+    VertexStepMode,
 };
+
+use crate::device::DEPTH_FORMAT;
 
 const SHADER_SRC: &str = include_str!("../shaders/shape.wgsl");
 
-/// A single vertex in the shape batch: position + RGBA colour.
+/// A single vertex in the shape batch: 3D position + RGBA colour + texture
+/// coordinate.
+///
+/// 2D draw calls carry `z = 0.0` through; only `draw_triangle_3d` supplies a
+/// real z. Untextured geometry carries `uv = [0.0, 0.0]` and samples the
+/// registry's 1×1 white pixel, so every vertex goes through the same
+/// sample-and-multiply, textured or not.
 ///
 /// `repr(C)` + packed fields → safe to cast to `&[u8]` via `bytemuck`.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Vertex {
-    pub position: [f32; 2],
+    pub position: [f32; 3],
     pub color: [f32; 4],
+    pub uv: [f32; 2],
 }
 
 impl Vertex {
-    const ATTRIBUTES: [VertexAttribute; 2] = wgpu::vertex_attr_array![
-        0 => Float32x2,
+    const ATTRIBUTES: [VertexAttribute; 3] = wgpu::vertex_attr_array![
+        0 => Float32x3,
         1 => Float32x4,
+        2 => Float32x2,
     ];
 
     pub fn layout() -> VertexBufferLayout<'static> {
@@ -35,7 +46,7 @@ impl Vertex {
 }
 
 /// The uniform buffer fed to `group(0) binding(0)` in the shader.
-/// Contains a column-major 4×4 orthographic projection matrix.
+/// Contains a column-major 4×4 projection matrix.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct CameraUniform {
@@ -48,27 +59,66 @@ impl CameraUniform {
     }
 }
 
-/// Owns the WGPU render pipeline, camera uniform buffer, and bind group
-/// for drawing coloured 2D shapes.
-pub struct ShapePipeline {
-    pub pipeline: RenderPipeline,
-    pub camera_buffer: Buffer,
-    pub camera_bind_group: BindGroup,
-    pub bind_group_layout: BindGroupLayout,
+/// A camera's uniform buffer paired with the bind group that exposes it.
+///
+/// The 2D and 3D cameras differ only in the matrix they carry, so both are
+/// built from this type against the same layout.
+pub struct Camera {
+    pub buffer: Buffer,
+    pub bind_group: BindGroup,
 }
 
-impl ShapePipeline {
-    pub fn new(device: &Device, surface_format: TextureFormat) -> Self {
-        let shader: ShaderModule = device.create_shader_module(ShaderModuleDescriptor {
-            label: Some("REDIXEL_SHAPE_SHADER"),
-            source: ShaderSource::Wgsl(SHADER_SRC.into()),
-        });
-
-        let camera_buffer: Buffer = device.create_buffer(&BufferDescriptor {
-            label: Some("REDIXEL_CAMERA_BUFFER"),
+impl Camera {
+    fn new(device: &Device, layout: &BindGroupLayout, buffer_label: &str, group_label: &str) -> Self {
+        let buffer: Buffer = device.create_buffer(&BufferDescriptor {
+            label: Some(buffer_label),
             size: std::mem::size_of::<CameraUniform>() as u64,
             usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
             mapped_at_creation: false,
+        });
+
+        let bind_group: BindGroup = device.create_bind_group(&BindGroupDescriptor {
+            label: Some(group_label),
+            layout,
+            entries: &[BindGroupEntry {
+                binding: 0,
+                resource: BindingResource::Buffer(buffer.as_entire_buffer_binding()),
+            }],
+        });
+
+        Self { buffer, bind_group }
+    }
+
+    /// Uploads `projection` to this camera's uniform buffer.
+    pub fn update(&self, queue: &Queue, projection: [[f32; 4]; 4]) {
+        let uniform: CameraUniform = CameraUniform::from_mat4(projection);
+        queue.write_buffer(&self.buffer, 0, bytemuck::bytes_of(&uniform));
+    }
+}
+
+/// Owns the two render pipelines that draw shapes, and the camera uniform each
+/// one reads.
+///
+/// Both run the same shader over the same vertex layout, differing only in how
+/// they treat the depth attachment. Group 1 (texture + sampler) belongs to the
+/// [`TextureRegistry`], which owns its layout because it also owns every bind
+/// group built against it, and both pipelines declare it — so the 3D path binds
+/// the white pixel and its output is unchanged.
+///
+/// [`TextureRegistry`]: crate::texture::TextureRegistry
+pub struct ShapePipeline {
+    pub pipeline_2d: RenderPipeline,
+    pub pipeline_3d: RenderPipeline,
+    pub bind_group_layout: BindGroupLayout,
+    pub camera_2d: Camera,
+    pub camera_3d: Camera,
+}
+
+impl ShapePipeline {
+    pub fn new(device: &Device, surface_format: TextureFormat, texture_layout: &BindGroupLayout) -> Self {
+        let shader: ShaderModule = device.create_shader_module(ShaderModuleDescriptor {
+            label: Some("REDIXEL_SHAPE_SHADER"),
+            source: ShaderSource::Wgsl(SHADER_SRC.into()),
         });
 
         let bind_group_layout: BindGroupLayout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
@@ -85,32 +135,106 @@ impl ShapePipeline {
             }],
         });
 
-        let camera_bind_group: BindGroup = device.create_bind_group(&BindGroupDescriptor {
-            label: Some("REDIXEL_CAMERA_BIND_GROUP"),
-            layout: &bind_group_layout,
-            entries: &[BindGroupEntry {
-                binding: 0,
-                resource: BindingResource::Buffer(camera_buffer.as_entire_buffer_binding()),
-            }],
-        });
+        let camera_2d: Camera = Camera::new(
+            device,
+            &bind_group_layout,
+            "REDIXEL_CAMERA_BUFFER_2D",
+            "REDIXEL_CAMERA_BIND_GROUP_2D",
+        );
+
+        let camera_3d: Camera = Camera::new(
+            device,
+            &bind_group_layout,
+            "REDIXEL_CAMERA_BUFFER_3D",
+            "REDIXEL_CAMERA_BIND_GROUP_3D",
+        );
 
         let pipeline_layout: PipelineLayout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
             label: Some("REDIXEL_SHAPE_PIPELINE_LAYOUT"),
-            bind_group_layouts: &[Some(&bind_group_layout)],
+            bind_group_layouts: &[Some(&bind_group_layout), Some(texture_layout)],
             ..Default::default()
         });
 
-        let pipeline: RenderPipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
-            label: Some("REDIXEL_SHAPE_PIPELINE"),
-            layout: Some(&pipeline_layout),
+        let pipeline_2d: RenderPipeline = Self::create_pipeline(
+            device,
+            &shader,
+            &pipeline_layout,
+            surface_format,
+            "REDIXEL_SHAPE_PIPELINE_2D",
+            Self::depth_2d(),
+        );
+
+        let pipeline_3d: RenderPipeline = Self::create_pipeline(
+            device,
+            &shader,
+            &pipeline_layout,
+            surface_format,
+            "REDIXEL_SHAPE_PIPELINE_3D",
+            Self::depth_3d(),
+        );
+
+        Self {
+            pipeline_2d,
+            pipeline_3d,
+            bind_group_layout,
+            camera_2d,
+            camera_3d,
+        }
+    }
+
+    /// Depth state for 3D geometry: a real depth test, written to the buffer.
+    ///
+    /// `LessEqual` rather than `Less` so coplanar geometry resolves in
+    /// submission order instead of the second surface failing its own test.
+    fn depth_3d() -> DepthStencilState {
+        DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(CompareFunction::LessEqual),
+            stencil: StencilState::default(),
+            bias: DepthBiasState::default(),
+        }
+    }
+
+    /// Depth state for 2D geometry: no test, no write.
+    ///
+    /// 2D content is painter-ordered, so later draw calls belong on top
+    /// regardless of the buffer, and writing to it would let a flat overlay
+    /// occlude the 3D scene behind it.
+    fn depth_2d() -> DepthStencilState {
+        DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: Some(false),
+            depth_compare: Some(CompareFunction::Always),
+            stencil: StencilState::default(),
+            bias: DepthBiasState::default(),
+        }
+    }
+
+    /// Builds one of the two shape pipelines. They differ only in `depth`.
+    ///
+    /// Neither culls: `draw_triangle_3d` takes its corners in whatever order
+    /// the caller supplies, so culling would silently drop triangles wound the
+    /// "wrong" way.
+    fn create_pipeline(
+        device: &Device,
+        shader: &ShaderModule,
+        layout: &PipelineLayout,
+        surface_format: TextureFormat,
+        label: &str,
+        depth: DepthStencilState,
+    ) -> RenderPipeline {
+        device.create_render_pipeline(&RenderPipelineDescriptor {
+            label: Some(label),
+            layout: Some(layout),
             vertex: VertexState {
-                module: &shader,
+                module: shader,
                 entry_point: Some("vs_main"),
                 buffers: &[Some(Vertex::layout())],
                 compilation_options: Default::default(),
             },
             fragment: Some(FragmentState {
-                module: &shader,
+                module: shader,
                 entry_point: Some("fs_main"),
                 targets: &[Some(ColorTargetState {
                     format: surface_format,
@@ -125,23 +249,10 @@ impl ShapePipeline {
                 polygon_mode: PolygonMode::Fill,
                 ..Default::default()
             },
-            depth_stencil: None,
+            depth_stencil: Some(depth),
             multisample: MultisampleState::default(),
             multiview_mask: None,
             cache: None,
-        });
-
-        Self {
-            pipeline,
-            camera_buffer,
-            camera_bind_group,
-            bind_group_layout,
-        }
-    }
-
-    /// Uploads the current orthographic matrix to the GPU uniform buffer.
-    pub fn update_camera(&self, queue: &Queue, projection: [[f32; 4]; 4]) {
-        let uniform: CameraUniform = CameraUniform::from_mat4(projection);
-        queue.write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&uniform));
+        })
     }
 }

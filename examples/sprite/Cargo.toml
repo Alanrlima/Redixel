@@ -8,15 +8,15 @@ panic = "abort"
 strip = true
 
 [package]
-name = "triangle_3d"
+name = "sprite"
 version = "0.1.0"
 edition = "2024"
 publish = false
 
 [package.metadata.game]
-title = "Triangle 3D"
-description = "A rotating 3D triangle demonstrating mathematical projections, Z-sorting, and 3D transformations."
-tags = ["3D", "Math", "Projection"]
+title = "Sprite"
+description = "A texture pipeline test: a PNG-mapped crate spinning head-on, its faces UV-mapped and resolved by the depth buffer."
+tags = ["3D", "Rendering", "Textures"]
 
 [lib]
 crate-type = ["cdylib", "staticlib", "rlib"]

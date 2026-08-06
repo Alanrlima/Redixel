@@ -7,5 +7,11 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
+[features]
+wgpu = ["dep:wgpu"]
+
 [dependencies]
-wgpu = { workspace = true }
+wgpu = { workspace = true, optional = true }
+
+[package.metadata.docs.rs]
+all-features = true

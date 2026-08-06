@@ -135,7 +135,7 @@ All changes must go through a Pull Request (PR).
     - Formatting (`cargo fmt --check`)
     - Linter (`cargo clippy` - no warnings allowed)
     - Tests (`cargo test`)
-4.  **Code Review:** Request a review from a core team member. You cannot merge your own code.
+4.  **Code Review:** Request a review from a team member. You cannot merge your own code.
 5.  Once approved and the pipeline is green, the PR can be merged.
 
 ## License

@@ -24,7 +24,8 @@
 - [ ] **Shaders & Uniforms:** Pass global engine data (Time, Resolution, Camera View) to shaders via Uniform Buffers.
 - [ ] **Camera System:** Implement World-to-Screen coordinate transformation.
 - [ ] **Render Targets / Framebuffers:** Create intermediate textures to allow offscreen rendering, Pixel-Perfect scaling, and Post-Processing.
-- [ ] **Texture Support:** Implement raw image parsing (header reading) and texture upload to GPU.
+- [x] **Texture Support:** PNG decoding via the `image` crate, uploaded to `Rgba8UnormSrgb` textures sampled with `FilterMode::Nearest`. Alpha is blended, and a failed load draws a checkerboard instead of failing.
+- [ ] **Mipmaps:** Generate a mip chain per texture. `FilterMode::Nearest` with no mips keeps pixel art crisp at native scale and above, but a sprite minified below its native size aliases and shimmers as it moves.
 
 ## **Phase 3 — The 2D Renderer (Batching)**
 
@@ -34,7 +35,7 @@
 - [ ] **Batch Renderer:** Implement a dynamic Vertex Buffer that groups multiple sprites into a single draw call to minimize GPU overhead.
 - [ ] **Text & Font Renderer:** Integrate `ab_glyph` to generate font atlases and draw dynamic text via the Batch Renderer.
 - [ ] **Particle System:** Implement a lightweight data structure to process and render thousands of ephemeral quads efficiently.
-- [ ] **Z-Ordering:** Implement CPU-side depth sorting (Painter's Algorithm) or GPU-side depth buffering.
+- [x] **Z-Ordering:** GPU-side depth buffering (`Depth32Float`) resolves occlusion per pixel. 2D content stays painter-ordered, drawn over the depth-tested scene.
 - [ ] **Primitive Rendering:** Implement logic to draw debug shapes (lines, wireframe rectangles) for physics visualization.
 
 ## **Phase 4 — Input & Camera Control**

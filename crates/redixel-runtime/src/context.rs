@@ -1,18 +1,57 @@
 use redixel_core::{
-    RedixelError,
+    RedixelError, TextureId,
     game::{GameContext, InputBind, InputQuery},
     input::InputAction,
     net::{NetworkManager, NoOpNetwork},
 };
-use redixel_math::{Color, Vec2};
+use redixel_math::{Color, Vec2, Vec3};
 use redixel_platform::InputManager;
 
 /// A draw command buffered during `on_render` and flushed by the runtime.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum DrawCommand {
     ClearColor(Color),
-    Rect { position: Vec2, size: Vec2, color: Color },
-    Triangle { p1: Vec2, p2: Vec2, p3: Vec2, color: Color },
+    Rect {
+        position: Vec2,
+        size: Vec2,
+        color: Color,
+    },
+    Sprite {
+        position: Vec2,
+        size: Vec2,
+        texture: TextureId,
+        tint: Color,
+    },
+    Triangle {
+        p1: Vec2,
+        p2: Vec2,
+        p3: Vec2,
+        color: Color,
+    },
+    Triangle3d {
+        p1: Vec3,
+        p2: Vec3,
+        p3: Vec3,
+        color: Color,
+    },
+    Triangle3dTextured {
+        points: [Vec3; 3],
+        uvs: [Vec2; 3],
+        texture: TextureId,
+        tint: Color,
+    },
+}
+
+/// An image the game asked to load, waiting for the runtime to hand it to the
+/// renderer.
+///
+/// The bytes are owned because the request outlives the call that made it:
+/// game code may pass a temporary, and the upload happens later in the frame.
+#[derive(Debug, Clone)]
+pub struct TextureRequest {
+    pub id: TextureId,
+    pub bytes: Vec<u8>,
 }
 
 /// Concrete engine context passed to [`Game`](redixel_core::Game) callbacks each frame.
@@ -32,8 +71,10 @@ pub struct Context<A: InputAction> {
     fixed_alpha: f64,
     surface_width: u32,
     surface_height: u32,
+    next_texture_id: u32,
     pub(crate) input: InputManager<A>,
     pub(crate) commands: Vec<DrawCommand>,
+    pub(crate) texture_requests: Vec<TextureRequest>,
     pub(crate) network: Box<dyn NetworkManager>,
 }
 
@@ -55,10 +96,31 @@ impl<A: InputAction> Context<A> {
             fixed_alpha: 0.0,
             surface_width: 0,
             surface_height: 0,
+            next_texture_id: 0,
             input: InputManager::new(),
             commands: Vec::with_capacity(1024),
+            texture_requests: Vec::new(),
             network,
         }
+    }
+
+    /// Reserves a handle with nothing queued against it, which is what a load
+    /// that failed before producing bytes needs.
+    ///
+    /// Ids are sequential and never reused, so the renderer indexes its slots
+    /// by id directly, and an unfilled slot draws the checkerboard.
+    fn reserve_texture_id(&mut self) -> TextureId {
+        let id: TextureId = TextureId::new(self.next_texture_id);
+        self.next_texture_id += 1;
+        id
+    }
+
+    /// Reserves the next handle and queues `bytes` for the runtime to upload.
+    fn queue_texture(&mut self, bytes: Vec<u8>) -> TextureId {
+        let id: TextureId = self.reserve_texture_id();
+
+        self.texture_requests.push(TextureRequest { id, bytes });
+        id
     }
 
     /// Updates per-frame timing values. Called before `on_update`.
@@ -103,10 +165,20 @@ impl<A: InputAction> Context<A> {
         self.commands.drain(..)
     }
 
+    /// Drains queued texture loads for the renderer to upload.
+    pub(crate) fn drain_texture_requests(&mut self) -> impl Iterator<Item = TextureRequest> + '_ {
+        self.texture_requests.drain(..)
+    }
+
     /// Resets transient per-frame flags. Called after the renderer flushes.
+    ///
+    /// Texture requests are cleared here too: the windowed runtime has already
+    /// drained them, but headless never does, and the queue would otherwise
+    /// grow for the life of the process.
     pub(crate) fn reset_frame(&mut self) {
         self.should_exit = false;
         self.commands.clear();
+        self.texture_requests.clear();
     }
 
     /// Round-trip time to the server in milliseconds, once known — `None`
@@ -171,6 +243,21 @@ impl<A: InputAction> GameContext<A> for Context<A> {
         &mut self.input
     }
 
+    fn load_texture(&mut self, bytes: &[u8]) -> TextureId {
+        self.queue_texture(bytes.to_vec())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn load_texture_file(&mut self, path: &str) -> TextureId {
+        match std::fs::read(path) {
+            Ok(bytes) => self.queue_texture(bytes),
+            Err(e) => {
+                log::warn!("Failed to read texture '{path}': {e}. Drawing the missing-texture checkerboard.");
+                self.reserve_texture_id()
+            }
+        }
+    }
+
     fn clear_color(&mut self, color: Color) {
         self.commands
             .retain(|c: &DrawCommand| !matches!(c, DrawCommand::ClearColor(..)));
@@ -183,6 +270,36 @@ impl<A: InputAction> GameContext<A> for Context<A> {
 
     fn draw_rect(&mut self, position: Vec2, size: Vec2, color: Color) {
         self.commands.push(DrawCommand::Rect { position, size, color });
+    }
+
+    fn draw_sprite(&mut self, position: Vec2, size: Vec2, texture: TextureId) {
+        self.draw_sprite_tinted(position, size, texture, Color::WHITE);
+    }
+
+    fn draw_sprite_tinted(&mut self, position: Vec2, size: Vec2, texture: TextureId, tint: Color) {
+        self.commands.push(DrawCommand::Sprite {
+            position,
+            size,
+            texture,
+            tint,
+        });
+    }
+
+    fn draw_triangle_3d(&mut self, p1: Vec3, p2: Vec3, p3: Vec3, color: Color) {
+        self.commands.push(DrawCommand::Triangle3d { p1, p2, p3, color });
+    }
+
+    fn draw_triangle_3d_textured(&mut self, points: [Vec3; 3], uvs: [Vec2; 3], texture: TextureId) {
+        self.draw_triangle_3d_textured_tinted(points, uvs, texture, Color::WHITE);
+    }
+
+    fn draw_triangle_3d_textured_tinted(&mut self, points: [Vec3; 3], uvs: [Vec2; 3], texture: TextureId, tint: Color) {
+        self.commands.push(DrawCommand::Triangle3dTextured {
+            points,
+            uvs,
+            texture,
+            tint,
+        });
     }
 
     fn take_error(&mut self) -> Option<RedixelError> {
